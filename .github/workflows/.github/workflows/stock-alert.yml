@@ -1,0 +1,30 @@
+name: Stock Alert Bot
+
+on:
+  schedule:
+    # 한국장 마감 후: 평일 16:10 KST = 07:10 UTC
+    - cron: "10 7 * * 1-5"
+    # 미국장 마감 후: 평일 07:00 KST = 전날 22:00 UTC
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  run-stock-alert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install packages
+        run: |
+          pip install yfinance pandas requests numpy
+
+      - name: Run bot
+        run: |
+          python stock_alert_bot.py
