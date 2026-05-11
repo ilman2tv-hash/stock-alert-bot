@@ -21,7 +21,7 @@ jobs:
 
       - name: Install packages
         run: |
-          pip install yfinance pandas requests numpy
+          pip install yfinance pandas requests numpy pykrx lxml
 
       - name: Run stock alert bot
         run: |
