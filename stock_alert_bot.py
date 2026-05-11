@@ -34,15 +34,18 @@ def send_discord(message):
 
 def get_recent_kr_date():
     today = datetime.now()
+
     for i in range(10):
         d = today - timedelta(days=i)
         date_str = d.strftime("%Y%m%d")
+
         try:
             df = stock.get_market_cap_by_ticker(date_str, market="KOSPI")
             if not df.empty:
                 return date_str
         except Exception:
             pass
+
     return today.strftime("%Y%m%d")
 
 
@@ -91,7 +94,6 @@ def get_us_sp500_top_trading_value(top_n=80):
 
                 last = df.dropna().iloc[-1]
                 trading_value = float(last["Close"] * last["Volume"])
-
                 candidates[symbol] = trading_value
 
             except Exception:
@@ -155,6 +157,7 @@ def calculate_indicators(df):
     df["kijun"] = (df["High"].rolling(26).max() + df["Low"].rolling(26).min()) / 2
     df["senkouA"] = (df["tenkan"] + df["kijun"]) / 2
     df["senkouB"] = (df["High"].rolling(52).max() + df["Low"].rolling(52).min()) / 2
+
     df["cloudTop"] = df[["senkouA", "senkouB"]].max(axis=1)
     df["aboveCloud"] = df["Close"] > df["cloudTop"]
 
@@ -165,8 +168,17 @@ def calculate_indicators(df):
     up_move = high.diff()
     down_move = -low.diff()
 
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.where(
+        (up_move > down_move) & (up_move > 0),
+        up_move,
+        0
+    )
+
+    minus_dm = np.where(
+        (down_move > up_move) & (down_move > 0),
+        down_move,
+        0
+    )
 
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
@@ -174,8 +186,18 @@ def calculate_indicators(df):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
     atr = tr.ewm(alpha=1 / 14, adjust=False).mean()
-    plus_di = 100 * pd.Series(plus_dm, index=df.index).ewm(alpha=1 / 14, adjust=False).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(alpha=1 / 14, adjust=False).mean() / atr
+
+    plus_di = (
+        100 *
+        pd.Series(plus_dm, index=df.index).ewm(alpha=1 / 14, adjust=False).mean()
+        / atr
+    )
+
+    minus_di = (
+        100 *
+        pd.Series(minus_dm, index=df.index).ewm(alpha=1 / 14, adjust=False).mean()
+        / atr
+    )
 
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = dx.ewm(alpha=1 / 14, adjust=False).mean()
@@ -190,6 +212,10 @@ def calculate_indicators(df):
 def calculate_signals(df):
     df = calculate_indicators(df)
 
+    # ======================
+    # BUY 조건
+    # ======================
+
     df["earlyBase"] = (
         (df["diplus"] > df["diminus"]) &
         (df["obvUp"]) &
@@ -198,6 +224,25 @@ def calculate_signals(df):
         (df["adx"] > 20)
     )
 
+    # 기존 E-BUY
+    df["originalEarlyBuy"] = (
+        df["earlyBase"] &
+        (~df["earlyBase"].shift(1).fillna(False)) &
+        (df["Close"] > df["High"].shift(1))
+    )
+
+    # 빠른 E-BUY 전조 신호
+    df["preBuySignal"] = (
+        (df["diplus"] < df["diminus"]) &
+        (df["diplus"] > df["diplus"].shift(1)) &
+        (df["diminus"] < df["diminus"].shift(1)) &
+        (df["obvUp"]) &
+        (df["Close"] > df["ma20"]) &
+        (df["Close"] > df["kijun"]) &
+        (df["adx"] > 18)
+    )
+
+    # 강한 BUY
     df["rawMainBuy"] = (
         crossover(df["diplus"], df["diminus"]) &
         df["obvUp"] &
@@ -205,23 +250,46 @@ def calculate_signals(df):
         df["aboveCloud"]
     )
 
+    # ======================
+    # SELL 조건
+    # ======================
+
     df["sellTrigger1"] = (
-        ((df["diplus"] > df["diminus"]) & (df["adx"] < df["adx"].shift(2)) & (df["adx"] > 30)) |
-        ((df["Close"] > df["ma20"]) & crossunder(df["Close"], df["ma5"]))
+        (
+            (df["diplus"] > df["diminus"]) &
+            (df["adx"] < df["adx"].shift(2)) &
+            (df["adx"] > 30)
+        ) |
+        (
+            (df["Close"] > df["ma20"]) &
+            crossunder(df["Close"], df["ma5"])
+        )
     )
-    df["sellTrigger1Once"] = df["sellTrigger1"] & (~df["sellTrigger1"].shift(1).fillna(False))
+
+    df["sellTrigger1Once"] = (
+        df["sellTrigger1"] &
+        (~df["sellTrigger1"].shift(1).fillna(False))
+    )
 
     df["sellTrigger2"] = (
         crossunder(df["Close"], df["ma20"]) |
         crossunder(df["Close"], df["cloudTop"])
     )
-    df["sellTrigger2Once"] = df["sellTrigger2"] & (~df["sellTrigger2"].shift(1).fillna(False))
+
+    df["sellTrigger2Once"] = (
+        df["sellTrigger2"] &
+        (~df["sellTrigger2"].shift(1).fillna(False))
+    )
 
     df["sellTrigger3"] = (
         crossunder(df["diplus"], df["diminus"]) |
         crossunder(df["Close"], df["kijun"])
     )
-    df["sellTrigger3Once"] = df["sellTrigger3"] & (~df["sellTrigger3"].shift(1).fillna(False))
+
+    df["sellTrigger3Once"] = (
+        df["sellTrigger3"] &
+        (~df["sellTrigger3"].shift(1).fillna(False))
+    )
 
     mainSellStep = 0
     mainCanSell = False
@@ -239,7 +307,6 @@ def calculate_signals(df):
     for i in range(len(df)):
         row = df.iloc[i]
         close_now = row["Close"]
-        high_prev = df["High"].iloc[i - 1] if i > 0 else np.nan
 
         fakeBuyPriceZone = (
             fakeBuyBlockPrice is not None and
@@ -247,25 +314,43 @@ def calculate_signals(df):
             close_now <= fakeBuyBlockPrice * (1 + FAKE_BUY_BLOCK_PCT / 100)
         )
 
-        earlyBase_now = bool(row["earlyBase"]) if pd.notna(row["earlyBase"]) else False
-        earlyBase_prev = bool(df["earlyBase"].iloc[i - 1]) if i > 0 and pd.notna(df["earlyBase"].iloc[i - 1]) else False
-        rawMainBuy = bool(row["rawMainBuy"]) if pd.notna(row["rawMainBuy"]) else False
+        originalEarlyBuy = (
+            bool(row["originalEarlyBuy"])
+            if pd.notna(row["originalEarlyBuy"])
+            else False
+        )
 
-        mainBuyCondition = rawMainBuy and not fakeBuyPriceZone
+        preBuySignal = (
+            bool(row["preBuySignal"])
+            if pd.notna(row["preBuySignal"])
+            else False
+        )
 
-        rawEarlyBuyCondition = (
-            earlyBase_now and
-            not earlyBase_prev and
-            pd.notna(high_prev) and
-            close_now > high_prev and
-            not mainCanSell and
+        rawMainBuy = (
+            bool(row["rawMainBuy"])
+            if pd.notna(row["rawMainBuy"])
+            else False
+        )
+
+        mainBuyCondition = (
+            rawMainBuy and
             not fakeBuyPriceZone
         )
 
-        earlyBuyCondition = rawEarlyBuyCondition and not mainBuyCondition
+        earlyBuyCondition = (
+            (originalEarlyBuy or preBuySignal) and
+            not mainCanSell and
+            not earlyCanSell and
+            not fakeBuyPriceZone and
+            not mainBuyCondition
+        )
 
         mainSignal = ""
         earlySignal = ""
+
+        # ======================
+        # BUY 상태 처리
+        # ======================
 
         if earlyBuyCondition:
             earlySellStep = 0
@@ -286,13 +371,36 @@ def calculate_signals(df):
             earlyBuyBarIndex = None
             earlyBuyPrice = None
             earlySignal = ""
+
             fakeBuyBlockPrice = None
 
-        sell1 = bool(row["sellTrigger1Once"]) if pd.notna(row["sellTrigger1Once"]) else False
-        sell2 = bool(row["sellTrigger2Once"]) if pd.notna(row["sellTrigger2Once"]) else False
-        sell3 = bool(row["sellTrigger3Once"]) if pd.notna(row["sellTrigger3Once"]) else False
+        sell1 = (
+            bool(row["sellTrigger1Once"])
+            if pd.notna(row["sellTrigger1Once"])
+            else False
+        )
 
-        mainBarsAfterBuy = i - mainBuyBarIndex if mainBuyBarIndex is not None else None
+        sell2 = (
+            bool(row["sellTrigger2Once"])
+            if pd.notna(row["sellTrigger2Once"])
+            else False
+        )
+
+        sell3 = (
+            bool(row["sellTrigger3Once"])
+            if pd.notna(row["sellTrigger3Once"])
+            else False
+        )
+
+        # ======================
+        # 메인 BUY SELL 로직
+        # ======================
+
+        mainBarsAfterBuy = (
+            i - mainBuyBarIndex
+            if mainBuyBarIndex is not None
+            else None
+        )
 
         mainFastFullSell = (
             mainCanSell and
@@ -303,7 +411,11 @@ def calculate_signals(df):
             sell3
         )
 
-        mainSellTrigger1Valid = sell1 and mainBuyPrice is not None and close_now > mainBuyPrice
+        mainSellTrigger1Valid = (
+            sell1 and
+            mainBuyPrice is not None and
+            close_now > mainBuyPrice
+        )
 
         if mainFastFullSell:
             mainSignal = "FULL SELL"
@@ -324,7 +436,15 @@ def calculate_signals(df):
             mainSignal = "1/3 SELL"
             mainSellStep = 1
 
-        earlyBarsAfterBuy = i - earlyBuyBarIndex if earlyBuyBarIndex is not None else None
+        # ======================
+        # E-BUY SELL 로직
+        # ======================
+
+        earlyBarsAfterBuy = (
+            i - earlyBuyBarIndex
+            if earlyBuyBarIndex is not None
+            else None
+        )
 
         earlyFastFullSell = (
             earlyCanSell and
@@ -335,7 +455,11 @@ def calculate_signals(df):
             sell3
         )
 
-        earlySellTrigger1Valid = sell1 and earlyBuyPrice is not None and close_now > earlyBuyPrice
+        earlySellTrigger1Valid = (
+            sell1 and
+            earlyBuyPrice is not None and
+            close_now > earlyBuyPrice
+        )
 
         if earlyFastFullSell:
             earlySignal = "E-FULL"
