@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 
-WEBHOOK_URL = "여기에_디스코드_웹후크_URL"
+WEBHOOK_URL = "https://discord.com/api/webhooks/1503073387428446519/RNFbVwgOreGt4Hc708en5oh81_lEfG78YHb_PrUhgUGcin6CBu9Oslf-xIziv34ON1Ky"
 
 US_TICKERS = {
     "NVDA": "엔비디아",
