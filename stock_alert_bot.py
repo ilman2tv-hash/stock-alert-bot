@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
+import os
 from pykrx import stock
 from datetime import datetime, timedelta
 
@@ -13,6 +14,9 @@ FAKE_BUY_BLOCK_PCT = 5.0
 
 KR_TOP_N = 80
 US_TOP_N = 80
+
+MARKET_MODE = os.getenv("MARKET_MODE", "ALL")
+SIGNAL_LOOKBACK_DAYS = 3
 
 CRYPTO_TICKERS = {
     "BTC-USD": "비트코인",
@@ -113,7 +117,7 @@ def get_us_sp500_top_trading_value(top_n=80):
 
 
 def build_auto_tickers():
-    print("자동 종목 수집 중...")
+    print("전체 자동 종목 수집 중...")
 
     kr = get_kr_top_trading_value(KR_TOP_N)
     us = get_us_sp500_top_trading_value(US_TOP_N)
@@ -129,6 +133,24 @@ def build_auto_tickers():
     print(f"총 감시 종목: {len(tickers)}개")
 
     return tickers
+
+
+def build_tickers_by_mode():
+    if MARKET_MODE == "KR":
+        print("국장 모드 실행")
+        return get_kr_top_trading_value(KR_TOP_N)
+
+    elif MARKET_MODE == "US":
+        print("미장 모드 실행")
+        return get_us_sp500_top_trading_value(US_TOP_N)
+
+    elif MARKET_MODE == "CRYPTO":
+        print("코인 모드 실행")
+        return CRYPTO_TICKERS
+
+    else:
+        print("전체 모드 실행")
+        return build_auto_tickers()
 
 
 def crossover(a, b):
@@ -168,17 +190,8 @@ def calculate_indicators(df):
     up_move = high.diff()
     down_move = -low.diff()
 
-    plus_dm = np.where(
-        (up_move > down_move) & (up_move > 0),
-        up_move,
-        0
-    )
-
-    minus_dm = np.where(
-        (down_move > up_move) & (down_move > 0),
-        down_move,
-        0
-    )
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
 
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
@@ -212,10 +225,6 @@ def calculate_indicators(df):
 def calculate_signals(df):
     df = calculate_indicators(df)
 
-    # ======================
-    # BUY 조건
-    # ======================
-
     df["earlyBase"] = (
         (df["diplus"] > df["diminus"]) &
         (df["obvUp"]) &
@@ -224,14 +233,12 @@ def calculate_signals(df):
         (df["adx"] > 20)
     )
 
-    # 기존 E-BUY
     df["originalEarlyBuy"] = (
         df["earlyBase"] &
         (~df["earlyBase"].shift(1).fillna(False)) &
         (df["Close"] > df["High"].shift(1))
     )
 
-    # 빠른 E-BUY 전조 신호
     df["preBuySignal"] = (
         (df["diplus"] < df["diminus"]) &
         (df["diplus"] > df["diplus"].shift(1)) &
@@ -242,17 +249,12 @@ def calculate_signals(df):
         (df["adx"] > 18)
     )
 
-    # 강한 BUY
     df["rawMainBuy"] = (
         crossover(df["diplus"], df["diminus"]) &
         df["obvUp"] &
         (df["Close"] > df["ma20"]) &
         df["aboveCloud"]
     )
-
-    # ======================
-    # SELL 조건
-    # ======================
 
     df["sellTrigger1"] = (
         (
@@ -314,28 +316,11 @@ def calculate_signals(df):
             close_now <= fakeBuyBlockPrice * (1 + FAKE_BUY_BLOCK_PCT / 100)
         )
 
-        originalEarlyBuy = (
-            bool(row["originalEarlyBuy"])
-            if pd.notna(row["originalEarlyBuy"])
-            else False
-        )
+        originalEarlyBuy = bool(row["originalEarlyBuy"]) if pd.notna(row["originalEarlyBuy"]) else False
+        preBuySignal = bool(row["preBuySignal"]) if pd.notna(row["preBuySignal"]) else False
+        rawMainBuy = bool(row["rawMainBuy"]) if pd.notna(row["rawMainBuy"]) else False
 
-        preBuySignal = (
-            bool(row["preBuySignal"])
-            if pd.notna(row["preBuySignal"])
-            else False
-        )
-
-        rawMainBuy = (
-            bool(row["rawMainBuy"])
-            if pd.notna(row["rawMainBuy"])
-            else False
-        )
-
-        mainBuyCondition = (
-            rawMainBuy and
-            not fakeBuyPriceZone
-        )
+        mainBuyCondition = rawMainBuy and not fakeBuyPriceZone
 
         earlyBuyCondition = (
             (originalEarlyBuy or preBuySignal) and
@@ -347,10 +332,6 @@ def calculate_signals(df):
 
         mainSignal = ""
         earlySignal = ""
-
-        # ======================
-        # BUY 상태 처리
-        # ======================
 
         if earlyBuyCondition:
             earlySellStep = 0
@@ -374,33 +355,11 @@ def calculate_signals(df):
 
             fakeBuyBlockPrice = None
 
-        sell1 = (
-            bool(row["sellTrigger1Once"])
-            if pd.notna(row["sellTrigger1Once"])
-            else False
-        )
+        sell1 = bool(row["sellTrigger1Once"]) if pd.notna(row["sellTrigger1Once"]) else False
+        sell2 = bool(row["sellTrigger2Once"]) if pd.notna(row["sellTrigger2Once"]) else False
+        sell3 = bool(row["sellTrigger3Once"]) if pd.notna(row["sellTrigger3Once"]) else False
 
-        sell2 = (
-            bool(row["sellTrigger2Once"])
-            if pd.notna(row["sellTrigger2Once"])
-            else False
-        )
-
-        sell3 = (
-            bool(row["sellTrigger3Once"])
-            if pd.notna(row["sellTrigger3Once"])
-            else False
-        )
-
-        # ======================
-        # 메인 BUY SELL 로직
-        # ======================
-
-        mainBarsAfterBuy = (
-            i - mainBuyBarIndex
-            if mainBuyBarIndex is not None
-            else None
-        )
+        mainBarsAfterBuy = i - mainBuyBarIndex if mainBuyBarIndex is not None else None
 
         mainFastFullSell = (
             mainCanSell and
@@ -436,15 +395,7 @@ def calculate_signals(df):
             mainSignal = "1/3 SELL"
             mainSellStep = 1
 
-        # ======================
-        # E-BUY SELL 로직
-        # ======================
-
-        earlyBarsAfterBuy = (
-            i - earlyBuyBarIndex
-            if earlyBuyBarIndex is not None
-            else None
-        )
+        earlyBarsAfterBuy = i - earlyBuyBarIndex if earlyBuyBarIndex is not None else None
 
         earlyFastFullSell = (
             earlyCanSell and
@@ -490,7 +441,7 @@ def calculate_signals(df):
     return df, pd.DataFrame(signals)
 
 
-TICKERS = build_auto_tickers()
+TICKERS = build_tickers_by_mode()
 all_latest_signals = []
 
 for ticker, name in TICKERS.items():
@@ -520,17 +471,18 @@ for ticker, name in TICKERS.items():
 
         _, signal_df = calculate_signals(df)
 
-        last = signal_df.iloc[-1]
+        recent_signals = signal_df.tail(SIGNAL_LOOKBACK_DAYS)
 
-        if last["mainSignal"] or last["earlySignal"]:
-            all_latest_signals.append({
-                "ticker": ticker,
-                "name": name,
-                "date": last["date"],
-                "close": last["close"],
-                "mainSignal": last["mainSignal"],
-                "earlySignal": last["earlySignal"]
-            })
+        for _, last in recent_signals.iterrows():
+            if last["mainSignal"] or last["earlySignal"]:
+                all_latest_signals.append({
+                    "ticker": ticker,
+                    "name": name,
+                    "date": last["date"],
+                    "close": last["close"],
+                    "mainSignal": last["mainSignal"],
+                    "earlySignal": last["earlySignal"]
+                })
 
     except Exception as e:
         print(f"{ticker} 오류: {e}")
@@ -555,7 +507,7 @@ if all_latest_signals:
         else:
             sell_msgs.append(line)
 
-    msg = "🚨 자동 스캐너 신호 발생\n\n"
+    msg = f"🚨 자동 스캐너 신호 발생 - {MARKET_MODE} 모드\n\n"
 
     if buy_msgs:
         msg += "🟢 매수 후보\n\n" + "\n".join(buy_msgs) + "\n"
@@ -567,6 +519,6 @@ if all_latest_signals:
     print(msg)
 
 else:
-    msg = "✅ 자동 스캐너 실행 완료\n마지막 봉 기준 신규 신호 없음"
+    msg = f"✅ 자동 스캐너 실행 완료 - {MARKET_MODE} 모드\n최근 {SIGNAL_LOOKBACK_DAYS}봉 기준 신규 신호 없음"
     send_discord(msg)
     print(msg)
