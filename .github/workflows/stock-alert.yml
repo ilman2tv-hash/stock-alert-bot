@@ -42,7 +42,7 @@ jobs:
 
       - name: Install packages
         run: |
-          pip install yfinance pandas requests numpy pykrx lxml feedparser
+          pip install yfinance pandas requests numpy pykrx lxml feedparser googletrans==4.0.0rc1
 
       - name: Run stock alert bot
         run: |
