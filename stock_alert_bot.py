@@ -43,8 +43,10 @@ def send_discord(message):
 
 
 def get_news_titles(stock_name, ticker):
-    # 국내 종목은 한국어 뉴스, 미국/코인은 영문 뉴스로 검색
-    if ticker.endswith(".KS") or ticker.endswith(".KQ"):
+    # 국내 종목은 한국어 뉴스, 미국/코인은 미국 뉴스 검색 후 한국어 번역
+    is_kr_stock = ticker.endswith(".KS") or ticker.endswith(".KQ")
+
+    if is_kr_stock:
         query = quote(f"{stock_name} 주식")
         rss_url = (
             f"https://news.google.com/rss/search?"
@@ -70,12 +72,13 @@ def get_news_titles(stock_name, ticker):
             title = entry.title
             title = re.sub(r"\s-\s.+$", "", title).strip()
 
-if not (ticker.endswith(".KS") or ticker.endswith(".KQ")):
-    try:
-        title = translator.translate(title, dest="ko").text
-    except:
-        pass
-        
+            # 미국 주식/코인 뉴스는 한국어로 번역
+            if not is_kr_stock:
+                try:
+                    title = translator.translate(title, dest="ko").text
+                except Exception as e:
+                    print(f"번역 오류: {stock_name} {ticker} / {e}")
+
             if title and title not in seen:
                 news_titles.append(title)
                 seen.add(title)
