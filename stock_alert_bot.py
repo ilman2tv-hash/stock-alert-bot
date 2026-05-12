@@ -11,7 +11,7 @@ import re
 from pykrx import stock
 from datetime import datetime, timedelta
 
-WEBHOOK_URL = "디스코드웹훅주소"
+WEBHOOK_URL = "https://discord.com/api/webhooks/1503073387428446519/RNFbVwgOreGt4Hc708en5oh81_lEfG78YHb_PrUhgUGcin6CBu9Oslf-xIziv34ON1Ky"
 
 PERIOD = "1y"
 INTERVAL = "1d"
