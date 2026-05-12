@@ -6,10 +6,13 @@ import os
 import feedparser
 from urllib.parse import quote
 import re
+from googletrans import Translator
 from pykrx import stock
 from datetime import datetime, timedelta
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1503073387428446519/RNFbVwgOreGt4Hc708en5oh81_lEfG78YHb_PrUhgUGcin6CBu9Oslf-xIziv34ON1Ky"
+
+translator = Translator()
 
 PERIOD = "1y"
 INTERVAL = "1d"
@@ -67,6 +70,12 @@ def get_news_titles(stock_name, ticker):
             title = entry.title
             title = re.sub(r"\s-\s.+$", "", title).strip()
 
+if not (ticker.endswith(".KS") or ticker.endswith(".KQ")):
+    try:
+        title = translator.translate(title, dest="ko").text
+    except:
+        pass
+        
             if title and title not in seen:
                 news_titles.append(title)
                 seen.add(title)
