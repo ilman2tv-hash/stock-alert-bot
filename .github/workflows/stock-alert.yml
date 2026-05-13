@@ -1,39 +1,30 @@
 name: Stock Alert Bot
 
 on:
-  workflow_dispatch:
+  repository_dispatch:
+    types: [manual-trigger]  # cron-job.org에서 보낼 이벤트 타입
+  workflow_dispatch:          # 수동 실행용
 
 jobs:
-  run-stock-alert:
+  alert:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set market mode
-        run: |
-          HOUR=$(date -u +"%H")
-
-          if [ "$HOUR" = "07" ]; then
-            echo "MARKET_MODE=KR" >> $GITHUB_ENV
-          elif [ "$HOUR" = "21" ]; then
-            echo "MARKET_MODE=US" >> $GITHUB_ENV
-          elif [ "$HOUR" = "00" ]; then
-            echo "MARKET_MODE=CRYPTO" >> $GITHUB_ENV
-          else
-            echo "MARKET_MODE=ALL" >> $GITHUB_ENV
-          fi
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: '3.9'
 
-      - name: Install packages
+      - name: Install dependencies
         run: |
-          pip install yfinance pandas requests numpy pykrx lxml feedparser googletrans==4.0.0rc1
+          pip install yfinance pandas numpy requests feedparser googletrans==4.0.0-rc1 pykrx lxml
 
-      - name: Run stock alert bot
-        run: |
-          python stock_alert_bot.py
+      - name: Run Alert Script
+        env:
+          # cron-job.org에서 보낸 payload의 market 값을 MARKET_MODE로 설정
+          MARKET_MODE: ${{ github.event.client_payload.market || 'ALL' }}
+          # 디스코드 웹훅 주소를 여기에 직접 넣거나 GitHub Secrets에 등록하세요
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }} 
+        run: python stock_alert.py
