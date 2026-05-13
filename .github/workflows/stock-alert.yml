@@ -3,7 +3,19 @@ name: Stock Alert Bot
 on:
   repository_dispatch:
     types: [manual-trigger]
+
   workflow_dispatch:
+    inputs:
+      market:
+        description: 'Market mode'
+        required: true
+        default: 'KR'
+        type: choice
+        options:
+          - KR
+          - US
+          - CRYPTO
+          - ALL
 
 jobs:
   build:
@@ -11,7 +23,7 @@ jobs:
 
     env:
       WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-      MARKET_MODE: ${{ github.event.client_payload.market || 'ALL' }}
+      MARKET_MODE: ${{ github.event.client_payload.market || github.event.inputs.market || 'KR' }}
 
     steps:
       - name: Checkout code
@@ -26,6 +38,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy requests beautifulsoup4 feedparser googletrans==4.0.0-rc1 pykrx lxml html5lib
+
+      - name: Check env
+        run: |
+          echo "MARKET_MODE=$MARKET_MODE"
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "WEBHOOK_URL 없음"
+            exit 1
+          else
+            echo "WEBHOOK_URL 있음"
+          fi
 
       - name: Run script
         run: python stock_alert_bot.py
