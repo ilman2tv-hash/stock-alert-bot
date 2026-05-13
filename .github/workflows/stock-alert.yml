@@ -19,11 +19,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # 필요한 라이브러리 설치
           pip install yfinance pandas requests beautifulsoup4
 
       - name: Run script
-        run: |
-          # 폴더가 아닌 '파일(-type f)' 중에서만 검색하도록 수정했습니다.
-          SCRIPT_FILE=$(find . -type f -name "stock_alert.py" | head -n 1)
-          echo "Found script at: $SCRIPT_FILE"
-          python "$SCRIPT_FILE"
+        run: python stock_alert_bot.py  # 파일명을 사진과 똑같이 맞췄습니다!
