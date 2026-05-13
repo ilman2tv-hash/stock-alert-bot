@@ -10,7 +10,7 @@ from googletrans import Translator
 from pykrx import stock
 from datetime import datetime, timedelta
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://discord.com/api/webhooks/1503073387428446519/RNFbVwgOreGt4Hc708en5oh81_lEfG78YHb_PrUhgUGcin6CBu9Oslf-xIziv34ON1Ky")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 MARKET_MODE = os.getenv("MARKET_MODE", "ALL")
 
 translator = Translator()
@@ -21,6 +21,9 @@ KR_TOP_N = 80
 US_TOP_N = 80
 SIGNAL_LOOKBACK_DAYS = 3
 FAKE_BUY_BLOCK_PCT = 5.0
+
+ST_ATR_PERIOD = 10
+ST_FACTOR = 3.0
 
 CRYPTO_TICKERS = {
     "BTC-USD": "비트코인",
@@ -240,6 +243,54 @@ def calculate_dmi(df, length=14, smoothing=14):
     return plus_di, minus_di, adx
 
 
+def calculate_supertrend(df, atr_period=10, factor=3.0):
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = rma(tr, atr_period)
+
+    hl2 = (high + low) / 2
+    upper_basic = hl2 + factor * atr
+    lower_basic = hl2 - factor * atr
+
+    upper_band = upper_basic.copy()
+    lower_band = lower_basic.copy()
+    direction = pd.Series(index=df.index, dtype=float)
+    supertrend = pd.Series(index=df.index, dtype=float)
+
+    for i in range(len(df)):
+        if i == 0:
+            direction.iloc[i] = 1
+            supertrend.iloc[i] = upper_band.iloc[i]
+            continue
+
+        prev_close = close.iloc[i - 1]
+
+        if upper_basic.iloc[i] < upper_band.iloc[i - 1] or prev_close > upper_band.iloc[i - 1]:
+            upper_band.iloc[i] = upper_basic.iloc[i]
+        else:
+            upper_band.iloc[i] = upper_band.iloc[i - 1]
+
+        if lower_basic.iloc[i] > lower_band.iloc[i - 1] or prev_close < lower_band.iloc[i - 1]:
+            lower_band.iloc[i] = lower_basic.iloc[i]
+        else:
+            lower_band.iloc[i] = lower_band.iloc[i - 1]
+
+        if direction.iloc[i - 1] == 1:
+            direction.iloc[i] = -1 if close.iloc[i] > upper_band.iloc[i] else 1
+        else:
+            direction.iloc[i] = 1 if close.iloc[i] < lower_band.iloc[i] else -1
+
+        supertrend.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == -1 else upper_band.iloc[i]
+
+    return supertrend, direction
+
+
 def calculate_signals(df):
     df = df.copy()
 
@@ -266,55 +317,37 @@ def calculate_signals(df):
     df["cloudTop"] = df[["senkouA", "senkouB"]].max(axis=1)
     df["aboveCloud"] = df["Close"] > df["cloudTop"]
 
-    df["earlyBase"] = (
-        (df["diplus"] > df["diminus"]) &
-        (df["obvUp"]) &
-        (df["Close"] > df["ma20"]) &
-        (df["Close"] > df["kijun"]) &
-        (df["adx"] > 20)
+    df["supertrend"], df["stDirection"] = calculate_supertrend(df, ST_ATR_PERIOD, ST_FACTOR)
+
+    df["superTrendBuy"] = (
+        (df["stDirection"] < 0) &
+        (df["stDirection"].shift(1) > 0)
     )
 
-    df["originalEarlyBuy"] = (
-        df["earlyBase"] &
-        (~df["earlyBase"].shift(1).fillna(False)) &
-        (df["Close"] > df["High"].shift(1))
+    df["superTrendFullSell"] = (
+        (df["stDirection"] > 0) &
+        (df["stDirection"].shift(1) < 0)
     )
 
-    df["preBuySignal"] = (
-        (df["diplus"] < df["diminus"]) &
-        (df["diplus"] > df["diplus"].shift(1)) &
-        (df["diminus"] < df["diminus"].shift(1)) &
-        (df["obvUp"]) &
-        (df["Close"] > df["ma20"]) &
-        (df["Close"] > df["kijun"]) &
-        (df["adx"] > 18)
-    )
-
-    df["sellTrigger1"] = (
-        ((df["diplus"] > df["diminus"]) & (df["adx"] < df["adx"].shift(2)) & (df["adx"] > 30)) |
-        ((df["Close"] > df["ma20"]) & crossunder(df["Close"], df["ma5"]))
-    )
-    df["sellTrigger1Once"] = df["sellTrigger1"] & (~df["sellTrigger1"].shift(1).fillna(False))
-
-    df["sellTrigger2"] = (
+    df["sellTriggerOneThird"] = (
         crossunder(df["Close"], df["ma20"]) |
         crossunder(df["Close"], df["cloudTop"])
     )
-    df["sellTrigger2Once"] = df["sellTrigger2"] & (~df["sellTrigger2"].shift(1).fillna(False))
+    df["sellTriggerOneThirdOnce"] = df["sellTriggerOneThird"] & (~df["sellTriggerOneThird"].shift(1).fillna(False))
 
-    df["sellTrigger3"] = (
+    df["sellTriggerHalf"] = (
         crossunder(df["diplus"], df["diminus"]) |
         crossunder(df["Close"], df["kijun"])
     )
-    df["sellTrigger3Once"] = df["sellTrigger3"] & (~df["sellTrigger3"].shift(1).fillna(False))
+    df["sellTriggerHalfOnce"] = df["sellTriggerHalf"] & (~df["sellTriggerHalf"].shift(1).fillna(False))
 
     df["BUY"] = False
-    df["E_BUY"] = False
+    df["ST_BUY"] = False
     df["SELL_1_3"] = False
     df["SELL_1_2"] = False
     df["FULL_SELL"] = False
 
-    canSell = False
+    tradeActive = False
     sellStep = 0
     buyBarIndex = None
     buyPrice = None
@@ -337,23 +370,23 @@ def calculate_signals(df):
             not fakeBuyPriceZone
         )
 
-        earlyBuyCondition = (
-            (bool(df["originalEarlyBuy"].iloc[i]) or bool(df["preBuySignal"].iloc[i])) and
-            not canSell and
-            not fakeBuyPriceZone and
-            not mainBuyCondition
+        trendBuyCondition = bool(df["superTrendBuy"].iloc[i])
+
+        buyAllowed = (not tradeActive) or (sellStep == 1)
+
+        buySignal = (
+            (mainBuyCondition or trendBuyCondition) and
+            buyAllowed
         )
 
-        buySignal = mainBuyCondition or earlyBuyCondition
-
         buyPlot = False
-        earlyBuyPlot = False
-        sellSignal1 = False
-        sellSignal2 = False
-        sellSignal3 = False
+        stBuyPlot = False
+        sellSignalOneThird = False
+        sellSignalHalf = False
+        sellSignalSuperTrend = False
 
-        if buySignal and not canSell:
-            canSell = True
+        if buySignal:
+            tradeActive = True
             sellStep = 0
             buyBarIndex = i
             buyPrice = close
@@ -361,50 +394,42 @@ def calculate_signals(df):
             if mainBuyCondition:
                 buyPlot = True
                 fakeBuyBlockPrice = None
-            else:
-                earlyBuyPlot = True
+            elif trendBuyCondition:
+                stBuyPlot = True
 
         barsAfterBuy = i - buyBarIndex if buyBarIndex is not None else None
 
-        fastFullSell = (
-            canSell and
+        fastHalfSell = (
+            tradeActive and
             not buySignal and
             barsAfterBuy is not None and
             barsAfterBuy > 0 and
             barsAfterBuy <= 3 and
-            bool(df["sellTrigger3Once"].iloc[i])
+            bool(df["sellTriggerHalfOnce"].iloc[i])
         )
 
-        sellTrigger1Valid = (
-            bool(df["sellTrigger1Once"].iloc[i]) and
-            buyPrice is not None and
-            close > buyPrice
-        )
-
-        if fastFullSell:
-            sellSignal3 = True
+        if tradeActive and not buySignal and bool(df["superTrendFullSell"].iloc[i]):
+            sellSignalSuperTrend = True
             sellStep = 3
-            canSell = False
+            tradeActive = False
             fakeBuyBlockPrice = buyPrice
 
-        elif canSell and not buySignal and sellStep <= 2 and bool(df["sellTrigger3Once"].iloc[i]):
-            sellSignal3 = True
-            sellStep = 3
-            canSell = False
-
-        elif canSell and not buySignal and sellStep <= 1 and bool(df["sellTrigger2Once"].iloc[i]):
-            sellSignal2 = True
+        elif tradeActive and not buySignal and sellStep <= 1 and (
+            fastHalfSell or bool(df["sellTriggerHalfOnce"].iloc[i])
+        ):
+            sellSignalHalf = True
             sellStep = 2
+            fakeBuyBlockPrice = buyPrice
 
-        elif canSell and not buySignal and sellStep == 0 and sellTrigger1Valid:
-            sellSignal1 = True
+        elif tradeActive and not buySignal and sellStep == 0 and bool(df["sellTriggerOneThirdOnce"].iloc[i]):
+            sellSignalOneThird = True
             sellStep = 1
 
         df.at[df.index[i], "BUY"] = buyPlot
-        df.at[df.index[i], "E_BUY"] = earlyBuyPlot
-        df.at[df.index[i], "SELL_1_3"] = sellSignal1
-        df.at[df.index[i], "SELL_1_2"] = sellSignal2
-        df.at[df.index[i], "FULL_SELL"] = sellSignal3
+        df.at[df.index[i], "ST_BUY"] = stBuyPlot
+        df.at[df.index[i], "SELL_1_3"] = sellSignalOneThird
+        df.at[df.index[i], "SELL_1_2"] = sellSignalHalf
+        df.at[df.index[i], "FULL_SELL"] = sellSignalSuperTrend
 
     return df
 
@@ -447,8 +472,8 @@ for ticker, name in TICKERS.items():
         for idx, row in last_rows.iterrows():
             signal = None
 
-            if bool(row["E_BUY"]):
-                signal = "E-BUY"
+            if bool(row["ST_BUY"]):
+                signal = "ST BUY"
             elif bool(row["BUY"]):
                 signal = "BUY"
             elif bool(row["SELL_1_3"]):
@@ -456,7 +481,7 @@ for ticker, name in TICKERS.items():
             elif bool(row["SELL_1_2"]):
                 signal = "1/2 SELL"
             elif bool(row["FULL_SELL"]):
-                signal = "FULL SELL"
+                signal = "ST FULL SELL"
 
             if signal:
                 all_latest_signals.append({
