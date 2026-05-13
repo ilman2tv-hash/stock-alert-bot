@@ -19,9 +19,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 필요한 라이브러리들을 직접 설치하거나, 폴더 안의 requirements.txt를 사용합니다.
           pip install yfinance pandas requests beautifulsoup4
-          # 만약 TA-Lib 등을 사용하신다면 추가 설치가 필요할 수 있습니다.
 
       - name: Run script
-        run: python stock-alert-bot/stock_alert.py  # 폴더 경로를 정확히 지정했습니다.
+        # find 명령어를 써서 파일 위치를 자동으로 찾아 실행하게 만들었습니다.
+        run: |
+          SCRIPT_PATH=$(find . -name "stock_alert.py" | head -n 1)
+          python "$SCRIPT_PATH"
