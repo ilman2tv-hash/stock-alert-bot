@@ -22,7 +22,8 @@ jobs:
           pip install yfinance pandas requests beautifulsoup4
 
       - name: Run script
-        # find 명령어를 써서 파일 위치를 자동으로 찾아 실행하게 만들었습니다.
         run: |
-          SCRIPT_PATH=$(find . -name "stock_alert.py" | head -n 1)
-          python "$SCRIPT_PATH"
+          # 폴더가 아닌 '파일(-type f)' 중에서만 검색하도록 수정했습니다.
+          SCRIPT_FILE=$(find . -type f -name "stock_alert.py" | head -n 1)
+          echo "Found script at: $SCRIPT_FILE"
+          python "$SCRIPT_FILE"
