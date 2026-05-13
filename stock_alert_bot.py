@@ -20,6 +20,7 @@ INTERVAL = "1d"
 KR_TOP_N = 80
 US_TOP_N = 80
 SIGNAL_LOOKBACK_DAYS = 3
+FAKE_BUY_BLOCK_PCT = 5.0
 
 CRYPTO_TICKERS = {
     "BTC-USD": "비트코인",
@@ -152,6 +153,9 @@ def get_us_sp500_top_trading_value(top_n=80):
             try:
                 df = yf.download(symbol, period="5d", interval="1d", progress=False, auto_adjust=False)
 
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+
                 if df.empty:
                     continue
 
@@ -178,23 +182,27 @@ def build_tickers_by_mode():
     print("MARKET_MODE:", MARKET_MODE)
 
     if MARKET_MODE == "KR":
-        print("💡 모드: 국장(KOREA) 전용 스캔")
+        print("💡 모드: 국장 전용 스캔")
         return get_kr_top_trading_value(KR_TOP_N)
 
     elif MARKET_MODE == "US":
-        print("💡 모드: 미장(USA) 전용 스캔")
+        print("💡 모드: 미장 전용 스캔")
         return get_us_sp500_top_trading_value(US_TOP_N)
 
     elif MARKET_MODE == "CRYPTO":
-        print("💡 모드: 코인(CRYPTO) 전용 스캔")
+        print("💡 모드: 코인 전용 스캔")
         return CRYPTO_TICKERS
 
     else:
-        print("💡 모드: 전체(ALL) 스캔")
+        print("💡 모드: 전체 스캔")
         all_t = get_kr_top_trading_value(KR_TOP_N)
         all_t.update(get_us_sp500_top_trading_value(US_TOP_N))
         all_t.update(CRYPTO_TICKERS)
         return all_t
+
+
+def rma(series, length):
+    return series.ewm(alpha=1 / length, adjust=False).mean()
 
 
 def crossover(a, b):
@@ -205,44 +213,198 @@ def crossunder(a, b):
     return (a < b) & (a.shift(1) >= b.shift(1))
 
 
+def calculate_dmi(df, length=14, smoothing=14):
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+
+    up = high.diff()
+    down = -low.diff()
+
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr = rma(tr, length)
+
+    plus_di = 100 * rma(pd.Series(plus_dm, index=df.index), length) / atr
+    minus_di = 100 * rma(pd.Series(minus_dm, index=df.index), length) / atr
+
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    adx = rma(dx, smoothing)
+
+    return plus_di, minus_di, adx
+
+
 def calculate_signals(df):
     df = df.copy()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df["diplus"], df["diminus"], df["adx"] = calculate_dmi(df, 14, 14)
 
     df["ma20"] = df["Close"].rolling(20).mean()
     df["ma5"] = df["Close"].rolling(5).mean()
 
-    df["obv"] = (np.sign(df["Close"].diff()) * df["Volume"]).fillna(0).cumsum()
+    df["obv"] = np.where(
+        df["Close"] > df["Close"].shift(1),
+        df["Volume"],
+        np.where(df["Close"] < df["Close"].shift(1), -df["Volume"], 0)
+    ).cumsum()
+
     df["obvUp"] = df["obv"] > df["obv"].shift(1)
 
     df["tenkan"] = (df["High"].rolling(9).max() + df["Low"].rolling(9).min()) / 2
     df["kijun"] = (df["High"].rolling(26).max() + df["Low"].rolling(26).min()) / 2
-
-    df["senkouA"] = ((df["tenkan"] + df["kijun"]) / 2).shift(26)
-    df["senkouB"] = ((df["High"].rolling(52).max() + df["Low"].rolling(52).min()) / 2).shift(26)
+    df["senkouA"] = (df["tenkan"] + df["kijun"]) / 2
+    df["senkouB"] = (df["High"].rolling(52).max() + df["Low"].rolling(52).min()) / 2
     df["cloudTop"] = df[["senkouA", "senkouB"]].max(axis=1)
+    df["aboveCloud"] = df["Close"] > df["cloudTop"]
 
-    plus_dm = df["High"].diff().clip(lower=0)
-    minus_dm = -df["Low"].diff().clip(upper=0)
+    df["earlyBase"] = (
+        (df["diplus"] > df["diminus"]) &
+        (df["obvUp"]) &
+        (df["Close"] > df["ma20"]) &
+        (df["Close"] > df["kijun"]) &
+        (df["adx"] > 20)
+    )
 
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        abs(df["High"] - df["Close"].shift(1)),
-        abs(df["Low"] - df["Close"].shift(1))
-    ], axis=1).max(axis=1)
+    df["originalEarlyBuy"] = (
+        df["earlyBase"] &
+        (~df["earlyBase"].shift(1).fillna(False)) &
+        (df["Close"] > df["High"].shift(1))
+    )
 
-    atr = tr.rolling(14).mean()
+    df["preBuySignal"] = (
+        (df["diplus"] < df["diminus"]) &
+        (df["diplus"] > df["diplus"].shift(1)) &
+        (df["diminus"] < df["diminus"].shift(1)) &
+        (df["obvUp"]) &
+        (df["Close"] > df["ma20"]) &
+        (df["Close"] > df["kijun"]) &
+        (df["adx"] > 18)
+    )
 
-    plus_di = 100 * (plus_dm.rolling(14).mean() / atr)
-    minus_di = 100 * (minus_dm.rolling(14).mean() / atr)
+    df["sellTrigger1"] = (
+        ((df["diplus"] > df["diminus"]) & (df["adx"] < df["adx"].shift(2)) & (df["adx"] > 30)) |
+        ((df["Close"] > df["ma20"]) & crossunder(df["Close"], df["ma5"]))
+    )
+    df["sellTrigger1Once"] = df["sellTrigger1"] & (~df["sellTrigger1"].shift(1).fillna(False))
 
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    df["sellTrigger2"] = (
+        crossunder(df["Close"], df["ma20"]) |
+        crossunder(df["Close"], df["cloudTop"])
+    )
+    df["sellTrigger2Once"] = df["sellTrigger2"] & (~df["sellTrigger2"].shift(1).fillna(False))
 
-    df["adx"] = dx.rolling(14).mean()
-    df["diplus"] = plus_di
-    df["diminus"] = minus_di
+    df["sellTrigger3"] = (
+        crossunder(df["diplus"], df["diminus"]) |
+        crossunder(df["Close"], df["kijun"])
+    )
+    df["sellTrigger3Once"] = df["sellTrigger3"] & (~df["sellTrigger3"].shift(1).fillna(False))
 
-    df["mainBuy"] = crossover(df["diplus"], df["diminus"]) & df["obvUp"] & (df["Close"] > df["ma20"])
-    df["mainSell"] = crossunder(df["diplus"], df["diminus"]) | crossunder(df["Close"], df["ma20"])
+    df["BUY"] = False
+    df["E_BUY"] = False
+    df["SELL_1_3"] = False
+    df["SELL_1_2"] = False
+    df["FULL_SELL"] = False
+
+    canSell = False
+    sellStep = 0
+    buyBarIndex = None
+    buyPrice = None
+    fakeBuyBlockPrice = None
+
+    for i in range(len(df)):
+        close = float(df["Close"].iloc[i])
+
+        fakeBuyPriceZone = (
+            fakeBuyBlockPrice is not None and
+            close >= fakeBuyBlockPrice * (1 - FAKE_BUY_BLOCK_PCT / 100) and
+            close <= fakeBuyBlockPrice * (1 + FAKE_BUY_BLOCK_PCT / 100)
+        )
+
+        mainBuyCondition = (
+            bool(crossover(df["diplus"], df["diminus"]).iloc[i]) and
+            bool(df["obvUp"].iloc[i]) and
+            bool(df["Close"].iloc[i] > df["ma20"].iloc[i]) and
+            bool(df["aboveCloud"].iloc[i]) and
+            not fakeBuyPriceZone
+        )
+
+        earlyBuyCondition = (
+            (bool(df["originalEarlyBuy"].iloc[i]) or bool(df["preBuySignal"].iloc[i])) and
+            not canSell and
+            not fakeBuyPriceZone and
+            not mainBuyCondition
+        )
+
+        buySignal = mainBuyCondition or earlyBuyCondition
+
+        buyPlot = False
+        earlyBuyPlot = False
+        sellSignal1 = False
+        sellSignal2 = False
+        sellSignal3 = False
+
+        if buySignal and not canSell:
+            canSell = True
+            sellStep = 0
+            buyBarIndex = i
+            buyPrice = close
+
+            if mainBuyCondition:
+                buyPlot = True
+                fakeBuyBlockPrice = None
+            else:
+                earlyBuyPlot = True
+
+        barsAfterBuy = i - buyBarIndex if buyBarIndex is not None else None
+
+        fastFullSell = (
+            canSell and
+            not buySignal and
+            barsAfterBuy is not None and
+            barsAfterBuy > 0 and
+            barsAfterBuy <= 3 and
+            bool(df["sellTrigger3Once"].iloc[i])
+        )
+
+        sellTrigger1Valid = (
+            bool(df["sellTrigger1Once"].iloc[i]) and
+            buyPrice is not None and
+            close > buyPrice
+        )
+
+        if fastFullSell:
+            sellSignal3 = True
+            sellStep = 3
+            canSell = False
+            fakeBuyBlockPrice = buyPrice
+
+        elif canSell and not buySignal and sellStep <= 2 and bool(df["sellTrigger3Once"].iloc[i]):
+            sellSignal3 = True
+            sellStep = 3
+            canSell = False
+
+        elif canSell and not buySignal and sellStep <= 1 and bool(df["sellTrigger2Once"].iloc[i]):
+            sellSignal2 = True
+            sellStep = 2
+
+        elif canSell and not buySignal and sellStep == 0 and sellTrigger1Valid:
+            sellSignal1 = True
+            sellStep = 1
+
+        df.at[df.index[i], "BUY"] = buyPlot
+        df.at[df.index[i], "E_BUY"] = earlyBuyPlot
+        df.at[df.index[i], "SELL_1_3"] = sellSignal1
+        df.at[df.index[i], "SELL_1_2"] = sellSignal2
+        df.at[df.index[i], "FULL_SELL"] = sellSignal3
 
     return df
 
@@ -268,11 +430,14 @@ for ticker, name in TICKERS.items():
             auto_adjust=False
         )
 
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
         if df.empty:
             print(f"{ticker} 데이터 없음")
             continue
 
-        if len(df) < 60:
+        if len(df) < 80:
             print(f"{ticker} 데이터 부족:", len(df))
             continue
 
@@ -280,21 +445,29 @@ for ticker, name in TICKERS.items():
         last_rows = df.tail(SIGNAL_LOOKBACK_DAYS)
 
         for idx, row in last_rows.iterrows():
-            buy_signal = bool(row["mainBuy"])
-            sell_signal = bool(row["mainSell"])
+            signal = None
 
-            if buy_signal or sell_signal:
-                signal_type = "BUY" if buy_signal else "SELL"
+            if bool(row["E_BUY"]):
+                signal = "E-BUY"
+            elif bool(row["BUY"]):
+                signal = "BUY"
+            elif bool(row["SELL_1_3"]):
+                signal = "1/3 SELL"
+            elif bool(row["SELL_1_2"]):
+                signal = "1/2 SELL"
+            elif bool(row["FULL_SELL"]):
+                signal = "FULL SELL"
 
+            if signal:
                 all_latest_signals.append({
                     "ticker": ticker,
                     "name": name,
                     "date": idx,
                     "close": row["Close"],
-                    "signal": signal_type
+                    "signal": signal
                 })
 
-                print(f"신호 발견: {signal_type} {name} {ticker}")
+                print(f"신호 발견: {signal} {name} {ticker}")
 
     except Exception as e:
         print(f"종목 처리 오류 {ticker} {name}: {e}")
