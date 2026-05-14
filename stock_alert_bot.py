@@ -71,6 +71,61 @@ def send_discord(message):
         print("Discord 전송 오류:", e)
 
 
+def get_market_status():
+    try:
+        data = yf.download(
+            ["SPY", "QQQ", "^VIX"],
+            period="3mo",
+            interval="1d",
+            progress=False,
+            auto_adjust=False
+        )
+
+        if data.empty:
+            return "📊 시장상황: 조회 실패"
+
+        close = data["Close"]
+
+        spy = close["SPY"].dropna()
+        qqq = close["QQQ"].dropna()
+        vix = close["^VIX"].dropna()
+
+        if len(spy) < 30 or len(qqq) < 30 or len(vix) < 5:
+            return "📊 시장상황: 데이터 부족"
+
+        spy_risk_on = spy.ewm(span=10, adjust=False).mean().iloc[-1] > spy.ewm(span=30, adjust=False).mean().iloc[-1]
+        qqq_risk_on = qqq.ewm(span=10, adjust=False).mean().iloc[-1] > qqq.ewm(span=30, adjust=False).mean().iloc[-1]
+
+        vix_value = float(vix.iloc[-1])
+        vix_safe = vix_value < 20
+
+        vix_status = (
+            "안정" if vix_value < 20 else
+            "경계" if vix_value < 30 else
+            "위험"
+        )
+
+        score = int(spy_risk_on) + int(qqq_risk_on) + int(vix_safe)
+
+        market_status = (
+            "매우좋음" if score == 3 else
+            "보통" if score == 2 else
+            "약세" if score == 1 else
+            "위험"
+        )
+
+        return (
+            f"📊 시장상황: {market_status}\n"
+            f"🇺🇸 미국시장: {'상승' if spy_risk_on else '약세'}\n"
+            f"💻 기술주: {'상승' if qqq_risk_on else '약세'}\n"
+            f"😱 공포지수: {vix_value:.2f} ({vix_status})"
+        )
+
+    except Exception as e:
+        print("시장상황 조회 오류:", e)
+        return "📊 시장상황: 조회 실패"
+
+
 def get_news_titles(stock_name, ticker):
     is_kr_stock = ticker.endswith(".KS") or ticker.endswith(".KQ")
 
@@ -438,6 +493,8 @@ print("=== 실행 시작 ===")
 print("WEBHOOK_URL 있음:", bool(WEBHOOK_URL))
 print("MARKET_MODE:", MARKET_MODE)
 
+market_status_text = get_market_status()
+
 TICKERS = build_tickers_by_mode()
 print("총 스캔 종목 수:", len(TICKERS))
 
@@ -502,7 +559,10 @@ for ticker, name in TICKERS.items():
 print("발견 신호 수:", len(all_latest_signals))
 
 if all_latest_signals:
-    msg = f"🚨 [{MARKET_MODE}] 시장 자동 스캔 결과\n"
+    msg = (
+        f"🚨 [{MARKET_MODE}] 시장 자동 스캔 결과\n"
+        f"{market_status_text}\n"
+    )
 
     for s in all_latest_signals:
         news = "\n".join([f"• {t}" for t in get_news_titles(s["name"], s["ticker"])])
@@ -516,6 +576,9 @@ if all_latest_signals:
     send_discord(msg)
 
 else:
-    send_discord(f"✅ [{MARKET_MODE}] 스캔 완료: 특이 신호 없음")
+    send_discord(
+        f"✅ [{MARKET_MODE}] 스캔 완료: 특이 신호 없음\n"
+        f"{market_status_text}"
+    )
 
 print("=== 실행 종료 ===")
