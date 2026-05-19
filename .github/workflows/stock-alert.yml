@@ -7,15 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       market:
-        description: 'Market mode'
-        required: true
-        default: 'KR'
-        type: choice
-        options:
-          - KR
-          - US
-          - CRYPTO
-          - ALL
+        description: 'Market mode'
+        required: true
+        default: 'KR'
+        type: choice
+        options:
+          - KR
+          - US
+          - US_OPTION  # 미국 옵션 모드 추가
+          - ALL
 
 jobs:
   build:
