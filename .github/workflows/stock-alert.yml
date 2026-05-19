@@ -3,19 +3,18 @@ name: Stock Alert Bot
 on:
   repository_dispatch:
     types: [manual-trigger]
-
   workflow_dispatch:
     inputs:
       market:
-        description: 'Market mode'
-        required: true
-        default: 'KR'
-        type: choice
-        options:
-          - KR
-          - US
-          - US_OPTION  # 미국 옵션 모드 추가
-          - ALL
+        description: 'Market mode'
+        required: true
+        default: 'KR'
+        type: choice
+        options:
+          - KR
+          - US
+          - US_OPTION
+          - ALL
 
 jobs:
   build:
@@ -23,6 +22,7 @@ jobs:
 
     env:
       WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+      # 크론잡(payload)에서 오거나, 수동(inputs)에서 오는 값을 MARKET_MODE로 설정
       MARKET_MODE: ${{ github.event.client_payload.market || github.event.inputs.market || 'KR' }}
 
     steps:
