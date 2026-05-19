@@ -12,12 +12,10 @@ from datetime import datetime, timedelta
 
 # --- 환경 설정 ---
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-# 환경 변수가 없으면 기본값 KR로 설정
 MARKET_MODE = os.getenv("MARKET_MODE", "KR")
 
 translator = Translator()
 
-# 데이터 분석 설정
 PERIOD = "1y"
 INTERVAL = "1d"
 KR_TOP_N = 80
@@ -26,7 +24,6 @@ SIGNAL_LOOKBACK_DAYS = 2
 ST_ATR_PERIOD = 10
 ST_FACTOR = 3.0
 
-# --- 유틸리티 함수 ---
 def send_discord(message):
     if not WEBHOOK_URL or "http" not in WEBHOOK_URL:
         print("Webhook URL 오류")
@@ -44,15 +41,12 @@ def get_market_status():
         data = yf.download(["SPY", "QQQ", "^VIX"], period="3mo", interval="1d", progress=False)
         if data.empty: return "📊 시장상황: 조회 실패"
         close = data["Close"]
-        # 멀티인덱스 대응 및 최신값 추출
         spy = close["SPY"].dropna()
         qqq = close["QQQ"].dropna()
         vix = close["^VIX"].dropna()
-        
         spy_risk_on = spy.ewm(span=10).mean().iloc[-1] > spy.ewm(span=30).mean().iloc[-1]
         qqq_risk_on = qqq.ewm(span=10).mean().iloc[-1] > qqq.ewm(span=30).mean().iloc[-1]
         vix_val = float(vix.iloc[-1])
-        
         score = int(spy_risk_on) + int(qqq_risk_on) + int(vix_val < 20)
         status = ["위험", "약세", "보통", "매우좋음"][score]
         return f"📊 시장상황: {status} | VIX: {vix_val:.2f}"
@@ -77,30 +71,23 @@ def get_news_titles(stock_name, ticker):
     except:
         return ["뉴스 검색 오류"]
 
-# --- [신규] 미국 옵션 고신뢰도 수급 분석 ---
 def get_high_conf_us_option_signal():
     try:
-        # PCCR(수급), VIX(변동성), SPY(가격) 삼박자 다운로드
         data = yf.download(["SPY", "^VIX", "^PCCR"], period="5d", interval="1d", progress=False)
         if data.empty: return None
-        
         close = data["Close"]
         curr_pccr = float(close["^PCCR"].dropna().iloc[-1])
         curr_vix = float(close["^VIX"].dropna().iloc[-1])
         curr_spy = float(close["SPY"].dropna().iloc[-1])
         prev_spy = float(close["SPY"].dropna().iloc[-2])
-
-        # 상방 필터: PCCR 낮음(콜 우위) + VIX 낮음 + 주가 상승
         if curr_pccr < 0.60 and curr_vix < 20 and curr_spy > prev_spy:
             return f"🔥 **[미국 옵션 상방 신호]** 기관 콜옵션 매수 집중! (PCCR: {curr_pccr:.2f})"
-        # 하방 필터: PCCR 높음(풋 우위) + VIX 높음 + 주가 하락
         elif curr_pccr > 1.10 and curr_vix > 25 and curr_spy < prev_spy:
             return f"🚨 **[미국 옵션 하방 주의]** 기관 풋옵션 대량 유입! (PCCR: {curr_pccr:.2f})"
         return None
     except:
         return None
 
-# --- 지표 계산 함수들 ---
 def rma(series, length): return series.ewm(alpha=1/length, adjust=False).mean()
 def crossover(a, b): return (a > b) & (a.shift(1) <= b.shift(1))
 def crossunder(a, b): return (a < b) & (a.shift(1) >= b.shift(1))
@@ -108,25 +95,19 @@ def crossunder(a, b): return (a < b) & (a.shift(1) >= b.shift(1))
 def calculate_signals(df):
     df = df.copy()
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-    
-    # DMI
     high, low, close = df["High"], df["Low"], df["Close"]
+    tr = pd.concat([high-low, (high-close.shift(1)).abs(), (low-close.shift(1)).abs()], axis=1).max(axis=1)
+    atr = rma(tr, 14)
     up, down = high.diff(), -low.diff()
     plus_dm = np.where((up > down) & (up > 0), up, 0.0)
     minus_dm = np.where((down > up) & (down > 0), down, 0.0)
-    tr = pd.concat([high-low, (high-close.shift(1)).abs(), (low-close.shift(1)).abs()], axis=1).max(axis=1)
-    atr = rma(tr, 14)
     df["diplus"] = 100 * rma(pd.Series(plus_dm, index=df.index), 14) / atr
     df["diminus"] = 100 * rma(pd.Series(minus_dm, index=df.index), 14) / atr
-    
-    # MA / OBV / Cloud
     df["ma20"] = df["Close"].rolling(20).mean()
     df["obv"] = np.where(df["Close"] > df["Close"].shift(1), df["Volume"], np.where(df["Close"] < df["Close"].shift(1), -df["Volume"], 0)).cumsum()
     df["obvUp"] = df["obv"] > df["obv"].shift(1)
     df["senkouA"] = (((df.High.rolling(9).max() + df.Low.rolling(9).min())/2 + (df.High.rolling(26).max() + df.Low.rolling(26).min())/2)/2).shift(26)
     df["senkouB"] = ((df.High.rolling(52).max() + df.Low.rolling(52).min())/2).shift(26)
-    
-    # Supertrend
     hl2 = (df["High"] + df["Low"]) / 2
     atr_st = rma(tr, ST_ATR_PERIOD)
     upper = hl2 + ST_FACTOR * atr_st
@@ -139,14 +120,11 @@ def calculate_signals(df):
         else: dir_st.iloc[i] = dir_st.iloc[i-1]
         st.iloc[i] = lower.iloc[i] if dir_st.iloc[i] == -1 else upper.iloc[i]
     df["stDirection"] = dir_st
-
-    # 신호 조합
     df["BUY"] = crossover(df["diplus"], df["diminus"]) & df["obvUp"] & (df["Close"] > df["ma20"]) & (df["Close"] > df[["senkouA", "senkouB"]].max(axis=1))
     df["ST_BUY"] = (df["stDirection"] < 0) & (df["stDirection"].shift(1) > 0)
     df["FULL_SELL"] = (df["stDirection"] > 0) & (df["stDirection"].shift(1) < 0)
     return df
 
-# --- 종목 구성 (코인 제거됨) ---
 def get_kr_tickers(top_n=80):
     date = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
     res = {}
@@ -164,9 +142,8 @@ def get_us_tickers(top_n=80):
         return {s: s for s in syms}
     except: return {}
 
-# --- 메인 실행 ---
 if __name__ == "__main__":
-    print(f"=== 모드: {MARKET_MODE} 실행 ===")
+    print(f"=== {MARKET_MODE} 모드 실행 ===")
     m_status = get_market_status()
 
     if MARKET_MODE == "US_OPTION":
@@ -174,10 +151,11 @@ if __name__ == "__main__":
         if sig:
             send_discord(f"🇺🇸 **미국 옵션 실시간 이상징후**\n━━━━━━━━━━━━━━━━━━\n{sig}\n{m_status}\n━━━━━━━━━━━━━━━━━━")
         else:
-            print("특이사항 없음")
+            # 옵션은 특이사항 없으면 조용히 종료 (스팸 방지)
+            print("미국 옵션 특이사항 없음")
 
     else:
-        # 종목 스캔 모드 (KR, US, ALL)
+        # 국장/미장 종목 스캔은 예전처럼 무조건 보고
         target_tickers = {}
         if MARKET_MODE in ["KR", "ALL"]: target_tickers.update(get_kr_tickers(KR_TOP_N))
         if MARKET_MODE in ["US", "ALL"]: target_tickers.update(get_us_tickers(US_TOP_N))
@@ -188,15 +166,9 @@ if __name__ == "__main__":
                 df = yf.download(t, period=PERIOD, interval=INTERVAL, progress=False)
                 if len(df) < 50: continue
                 df = calculate_signals(df)
-                last = df.iloc[-1]
-                prev = df.iloc[-2]
-                
-                s_type = "ST BUY" if (last["stDirection"] < 0 and prev["stDirection"] > 0) else \
-                         "BUY" if (last["BUY"]) else \
-                         "FULL SELL" if (last["stDirection"] > 0 and prev["stDirection"] < 0) else None
-                
-                if s_type:
-                    found_signals.append({"t": t, "n": name, "s": s_type, "p": last["Close"]})
+                last, prev = df.iloc[-1], df.iloc[-2]
+                s_type = "ST BUY" if (last["stDirection"] < 0 and prev["stDirection"] > 0) else "BUY" if (last["BUY"]) else "FULL SELL" if (last["stDirection"] > 0 and prev["stDirection"] < 0) else None
+                if s_type: found_signals.append({"t": t, "n": name, "s": s_type, "p": last["Close"]})
             except: continue
             
         if found_signals:
@@ -206,6 +178,7 @@ if __name__ == "__main__":
                 msg += f"\n[{s['s']}] {s['n']} ({s['t']})\n💰 현재가: {float(s['p']):.2f}\n{news}\n"
             send_discord(msg)
         else:
-            print("신호 없음")
+            # 주식 스캔은 특이사항 없어도 보고
+            send_discord(f"✅ [{MARKET_MODE}] 시장 스캔 완료\n{m_status}\n현재 분석 대상 중 특이 신호 종목 없음")
 
     print("=== 실행 완료 ===")
