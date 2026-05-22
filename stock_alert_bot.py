@@ -18,8 +18,8 @@ translator = Translator()
 
 PERIOD = "1y"
 INTERVAL = "1d"
-KR_TOP_N = 80
-US_TOP_N = 80
+KR_TOP_N = 300
+US_TOP_N = 300
 SIGNAL_LOOKBACK_DAYS = 2
 ST_ATR_PERIOD = 10
 ST_FACTOR = 3.0
