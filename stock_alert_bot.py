@@ -18,8 +18,11 @@ translator = Translator()
 
 PERIOD = "1y"
 INTERVAL = "1d"
-KR_TOP_N = 300
-US_TOP_N = 300
+
+# [종목 문제 해결] 스캔 모수를 크게 넓혀 신호 포착 확률을 높입니다.
+KR_TOP_N = 400  # 코스피 200개 + 코스닥 200개
+US_TOP_N = 300  # S&P 500 상위 300개
+
 SIGNAL_LOOKBACK_DAYS = 2
 ST_ATR_PERIOD = 10
 ST_FACTOR = 3.0
@@ -110,6 +113,12 @@ def calculate_signals(df):
     df["obvUp"] = df["obv"] > df["obv"].shift(1)
     df["senkouA"] = (((df.High.rolling(9).max() + df.Low.rolling(9).min())/2 + (df.High.rolling(26).max() + df.Low.rolling(26).min())/2)/2).shift(26)
     df["senkouB"] = ((df.High.rolling(52).max() + df.Low.rolling(52).min())/2).shift(26)
+    
+    # 일목 구름대상단 계산
+    df["cloudTop"] = df[["senkouA", "senkouB"]].max(axis=1)
+    df["kijun"] = (df.High.rolling(26).max() + df.Low.rolling(26).min()) / 2
+
+    # 슈퍼트렌드 계산
     hl2 = (df["High"] + df["Low"]) / 2
     atr_st = rma(tr, ST_ATR_PERIOD)
     upper, lower = hl2 + ST_FACTOR * atr_st, hl2 - ST_FACTOR * atr_st
@@ -120,22 +129,35 @@ def calculate_signals(df):
         else: dir_st.iloc[i] = dir_st.iloc[i-1]
         st.iloc[i] = lower.iloc[i] if dir_st.iloc[i] == -1 else upper.iloc[i]
     df["stDirection"] = dir_st
-    df["BUY"] = crossover(df["diplus"], df["diminus"]) & df["obvUp"] & (df["Close"] > df["ma20"]) & (df["Close"] > df[["senkouA", "senkouB"]].max(axis=1))
+    
+    # [매수 신호] 
+    df["BUY"] = crossover(df["diplus"], df["diminus"]) & df["obvUp"] & (df["Close"] > df["ma20"]) & (df["Close"] > df["cloudTop"])
     df["ST_BUY"] = (df["stDirection"] < 0) & (df["stDirection"].shift(1) > 0)
+    
+    # [매도 신호] 1/3 매도 트리거 완벽 제거 후 1/2 매도와 전량 매도로 재편성
+    # 1/2 매도 조건: DMI 데드크로스 혹은 기준선 하향 이탈
+    df["HALF_SELL"] = crossunder(df["diplus"], df["diminus"]) | crossunder(df["Close"], df["kijun"])
+    # 전량 매도 조건: 슈퍼트렌드 데드크로스
     df["FULL_SELL"] = (df["stDirection"] > 0) & (df["stDirection"].shift(1) < 0)
+    
     return df
 
-def get_kr_tickers(top_n=80):
-    date = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-    res = {}
-    for m, s in [("KOSPI", ".KS"), ("KOSDAQ", ".KQ")]:
+def get_kr_tickers(top_n=400):
+    # 최신 영업일 안전 조회를 위한 실시간 날짜 백업 루프
+    for offset in range(0, 4):
+        date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+        res = {}
         try:
-            df = stock.get_market_cap_by_ticker(date, market=m).sort_values("거래대금", ascending=False).head(top_n//2)
-            for c in df.index: res[f"{c}{s}"] = stock.get_market_ticker_name(c)
+            df = stock.get_market_cap_by_ticker(date, market="KOSPI")
+            if not df.empty:
+                for m, s in [("KOSPI", ".KS"), ("KOSDAQ", ".KQ")]:
+                    sub_df = stock.get_market_cap_by_ticker(date, market=m).sort_values("거래대금", ascending=False).head(top_n//2)
+                    for c in sub_df.index: res[f"{c}{s}"] = stock.get_market_ticker_name(c)
+                return res
         except: pass
-    return res
+    return {}
 
-def get_us_tickers(top_n=80):
+def get_us_tickers(top_n=300):
     try:
         table = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
         syms = table["Symbol"].str.replace(".", "-", regex=False).tolist()[:top_n]
@@ -152,17 +174,34 @@ if __name__ == "__main__":
         if MARKET_MODE in ["KR", "ALL"]: target.update(get_kr_tickers(KR_TOP_N))
         if MARKET_MODE in ["US", "ALL"]: target.update(get_us_tickers(US_TOP_N))
         found = []
+        
         for t, name in target.items():
             try:
                 df = calculate_signals(yf.download(t, period=PERIOD, interval=INTERVAL, progress=False))
+                if df.empty or len(df) < 2: continue
+                
                 last, prev = df.iloc[-1], df.iloc[-2]
-                s_type = "ST BUY" if (last["stDirection"] < 0 and prev["stDirection"] > 0) else "BUY" if last["BUY"] else "FULL SELL" if (last["stDirection"] > 0 and prev["stDirection"] < 0) else None
-                if s_type: found.append({"t": t, "n": name, "s": s_type, "p": last["Close"]})
+                
+                # 신호 판정 분기 (1/3 매도 제외 반영)
+                s_type = None
+                if last["BUY"]:
+                    s_type = "MAIN BUY"
+                elif last["ST_BUY"]:
+                    s_type = "ST BUY"
+                elif last["HALF_SELL"]:
+                    s_type = "1/2 HALF SELL"
+                elif last["FULL_SELL"]:
+                    s_type = "ST FULL SELL"
+                
+                if s_type: 
+                    found.append({"t": t, "n": name, "s": s_type, "p": last["Close"]})
             except: continue
+            
         if found:
-            msg = f"🚨 [{MARKET_MODE}] 스캔 결과\n{m_status}\n"
+            msg = f"🚨 [{MARKET_MODE}] 스캔 결과 (모수 확장 완료)\n{m_status}\n"
             for s in found:
                 news_txt = "\n".join([f"• {n}" for n in get_news_titles(s['n'], s['t'])])
                 msg += f"\n[{s['s']}] {s['n']} ({s['t']})\n💰 현재가: {float(s['p']):.2f}\n{news_txt}\n"
             send_discord(msg)
-        else: send_discord(f"✅ [{MARKET_MODE}] 시장 스캔 완료\n{m_status}\n현재 특이 신호 종목 없음")
+        else: 
+            send_discord(f"✅ [{MARKET_MODE}] 시장 스캔 완료\n{m_status}\n현재 특이 신호 종목 없음")
