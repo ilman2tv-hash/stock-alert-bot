@@ -21,9 +21,9 @@ INTERVAL = "1d"
 
 # [종목 문제 해결] 스캔 모수를 크게 넓혀 신호 포착 확률을 높입니다.
 KR_TOP_N = 400  # 코스피 200개 + 코스닥 200개
-US_TOP_N = 300  # S&P 500 상위 300개
+US_TOP_N = 500  # S&P 500 상위 500개
 
-SIGNAL_LOOKBACK_DAYS = 2
+SIGNAL_LOOKBACK_DAYS = 5
 ST_ATR_PERIOD = 10
 ST_FACTOR = 3.0
 
