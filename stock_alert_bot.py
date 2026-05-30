@@ -21,7 +21,7 @@ INTERVAL = "1d"
 
 # [종목 문제 해결] 스캔 모수를 크게 넓혀 신호 포착 확률을 높입니다.
 KR_TOP_N = 400  # 코스피 200개 + 코스닥 200개
-US_TOP_N = 500  # S&P 500 상위 500개
+US_TOP_N = 500  # S&P 500 상위 500개 전체 스캔 (수정됨)
 
 SIGNAL_LOOKBACK_DAYS = 5
 ST_ATR_PERIOD = 10
@@ -178,30 +178,50 @@ if __name__ == "__main__":
         for t, name in target.items():
             try:
                 df = calculate_signals(yf.download(t, period=PERIOD, interval=INTERVAL, progress=False))
-                if df.empty or len(df) < 2: continue
+                if df.empty or len(df) < 10: continue
                 
-                last, prev = df.iloc[-1], df.iloc[-2]
+                last_price = df.iloc[-1]["Close"]
+                last_ma20 = df.iloc[-1]["ma20"]
+                last_cloud = df.iloc[-1]["cloudTop"]
                 
-                # 신호 판정 분기 (1/3 매도 제외 반영)
                 s_type = None
-                if last["BUY"]:
-                    s_type = "MAIN BUY"
-                elif last["ST_BUY"]:
-                    s_type = "ST BUY"
-                elif last["HALF_SELL"]:
-                    s_type = "1/2 HALF SELL"
-                elif last["FULL_SELL"]:
-                    s_type = "ST FULL SELL"
+                detected_days_ago = 0
+                
+                # 최근부터 과거로 역순 검사 (최대 7일)
+                for i in range(1, 8):
+                    row = df.iloc[-i]
+                    days_ago = i - 1  # 0: 오늘, 1: 1영업일 전
+                    
+                    # 과거 시점에 조건이 맞았고, 현재 가격이 여전히 주요 지지선(ma20, cloud) 위에 있는지 확인
+                    if row["BUY"] and (last_price > last_ma20) and (last_price > last_cloud):
+                        s_type = "MAIN BUY"
+                    elif row["ST_BUY"]:
+                        s_type = "ST BUY"
+                    elif row["HALF_SELL"]:
+                        s_type = "1/2 HALF SELL"
+                    elif row["FULL_SELL"]:
+                        s_type = "ST FULL SELL"
+                    
+                    # 신호가 발견되면 며칠 전인지 저장하고 루프 중단 (가장 최근 신호만 포착)
+                    if s_type:
+                        detected_days_ago = days_ago
+                        break
                 
                 if s_type: 
-                    found.append({"t": t, "n": name, "s": s_type, "p": last["Close"]})
+                    # 딕셔너리에 'd' (며칠 전인지) 값 추가
+                    found.append({"t": t, "n": name, "s": s_type, "p": last_price, "d": detected_days_ago})
             except: continue
             
         if found:
             msg = f"🚨 [{MARKET_MODE}] 스캔 결과 (모수 확장 완료)\n{m_status}\n"
             for s in found:
                 news_txt = "\n".join([f"• {n}" for n in get_news_titles(s['n'], s['t'])])
-                msg += f"\n[{s['s']}] {s['n']} ({s['t']})\n💰 현재가: {float(s['p']):.2f}\n{news_txt}\n"
+                
+                # 며칠 전인지 텍스트 변환
+                day_text = "오늘" if s['d'] == 0 else f"{s['d']}영업일 전"
+                
+                # 디스코드 메시지 포맷 (현재가 밑에 신호발생 추가)
+                msg += f"\n[{s['s']}] {s['n']} ({s['t']})\n💰 현재가: {float(s['p']):.2f}\n⏳ 신호발생: {day_text}\n{news_txt}\n"
             send_discord(msg)
         else: 
             send_discord(f"✅ [{MARKET_MODE}] 시장 스캔 완료\n{m_status}\n현재 특이 신호 종목 없음")
