@@ -252,7 +252,7 @@ if __name__ == "__main__":
                 detected_days_ago = 0
                 
                 # 최근 3영업일만 검사 (상태 관리가 들어가서 7일까지 볼 필요 없음)
-                for i in range(1, 4):
+                for i in range(1, 8):
                     row = df.iloc[-i]
                     days_ago = i - 1  # 0: 오늘, 1: 1영업일 전
                     
