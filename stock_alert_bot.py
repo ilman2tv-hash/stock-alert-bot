@@ -12,18 +12,17 @@ from datetime import datetime, timedelta
 
 # --- 환경 설정 ---
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-MARKET_MODE = os.getenv("MARKET_MODE", "KR")
+MARKET_MODE = os.getenv("MARKET_MODE", "KR") # "KR", "US", "ALL"
 
 translator = Translator()
 
 PERIOD = "1y"
 INTERVAL = "1d"
 
-# [종목 문제 해결] 스캔 모수를 크게 넓혀 신호 포착 확률을 높입니다.
 KR_TOP_N = 400  # 코스피 200개 + 코스닥 200개
-US_TOP_N = 500  # S&P 500 상위 500개 전체 스캔 (수정됨)
+US_TOP_N = 600  # S&P 500 + 나스닥 100 스캔 (확장됨)
 
-SIGNAL_LOOKBACK_DAYS = 5
+# 슈퍼트렌드 설정 (트레이딩뷰와 동일하게 맞추세요)
 ST_ATR_PERIOD = 10
 ST_FACTOR = 3.0
 
@@ -100,6 +99,8 @@ def crossunder(a, b): return (a < b) & (a.shift(1) >= b.shift(1))
 def calculate_signals(df):
     df = df.copy()
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    
+    # 1. 기본 지표 계산
     high, low, close = df["High"], df["Low"], df["Close"]
     tr = pd.concat([high-low, (high-close.shift(1)).abs(), (low-close.shift(1)).abs()], axis=1).max(axis=1)
     atr = rma(tr, 14)
@@ -111,14 +112,14 @@ def calculate_signals(df):
     df["ma20"] = df["Close"].rolling(20).mean()
     df["obv"] = np.where(df["Close"] > df["Close"].shift(1), df["Volume"], np.where(df["Close"] < df["Close"].shift(1), -df["Volume"], 0)).cumsum()
     df["obvUp"] = df["obv"] > df["obv"].shift(1)
+
+    # 2. 일목균형표
     df["senkouA"] = (((df.High.rolling(9).max() + df.Low.rolling(9).min())/2 + (df.High.rolling(26).max() + df.Low.rolling(26).min())/2)/2).shift(26)
     df["senkouB"] = ((df.High.rolling(52).max() + df.Low.rolling(52).min())/2).shift(26)
-    
-    # 일목 구름대상단 계산
     df["cloudTop"] = df[["senkouA", "senkouB"]].max(axis=1)
     df["kijun"] = (df.High.rolling(26).max() + df.Low.rolling(26).min()) / 2
 
-    # 슈퍼트렌드 계산
+    # 3. 슈퍼트렌드
     hl2 = (df["High"] + df["Low"]) / 2
     atr_st = rma(tr, ST_ATR_PERIOD)
     upper, lower = hl2 + ST_FACTOR * atr_st, hl2 - ST_FACTOR * atr_st
@@ -129,21 +130,79 @@ def calculate_signals(df):
         else: dir_st.iloc[i] = dir_st.iloc[i-1]
         st.iloc[i] = lower.iloc[i] if dir_st.iloc[i] == -1 else upper.iloc[i]
     df["stDirection"] = dir_st
-    
-    # [매수 신호] 
-    df["BUY"] = crossover(df["diplus"], df["diminus"]) & df["obvUp"] & (df["Close"] > df["ma20"]) & (df["Close"] > df["cloudTop"])
-    df["ST_BUY"] = (df["stDirection"] < 0) & (df["stDirection"].shift(1) > 0)
-    
-    # [매도 신호] 1/3 매도 트리거 완벽 제거 후 1/2 매도와 전량 매도로 재편성
-    # 1/2 매도 조건: DMI 데드크로스 혹은 기준선 하향 이탈
-    df["HALF_SELL"] = crossunder(df["diplus"], df["diminus"]) | crossunder(df["Close"], df["kijun"])
-    # 전량 매도 조건: 슈퍼트렌드 데드크로스
-    df["FULL_SELL"] = (df["stDirection"] > 0) & (df["stDirection"].shift(1) < 0)
-    
+
+    # 4. 개별 조건
+    df['di_cross_up'] = crossover(df["diplus"], df["diminus"])
+    df['di_cross_down'] = crossunder(df["diplus"], df["diminus"])
+    df['kijun_cross_down'] = crossunder(df["Close"], df["kijun"])
+
+    df['main_cond'] = df['di_cross_up'] & df['obvUp'] & (df['Close'] > df['ma20']) & (df['Close'] > df['cloudTop'])
+    df['st_buy_cond'] = (df["stDirection"] < 0) & (df["stDirection"].shift(1) > 0)
+    df['st_sell_cond'] = (df["stDirection"] > 0) & (df["stDirection"].shift(1) < 0)
+    df['sell_trigger_half'] = df['di_cross_down'] | df['kijun_cross_down']
+    df['sell_trigger_half_once'] = df['sell_trigger_half'] & ~df['sell_trigger_half'].shift(1).fillna(False)
+
+    # 5. 트레이딩뷰와 완전히 동일한 상태 관리 시뮬레이션
+    trade_active = False
+    sell_step = 0
+    buy_bar_index = -1
+    buy_price = np.nan
+    fake_buy_block_price = np.nan
+    fake_buy_block_pct = 5.0
+
+    sig_main_buy, sig_st_buy = [False]*len(df), [False]*len(df)
+    sig_half_sell, sig_full_sell = [False]*len(df), [False]*len(df)
+
+    for i in range(len(df)):
+        close_val = df["Close"].iloc[i]
+        
+        # 휩소(가짜 매수) 방지 구역 체크
+        in_fake_zone = False
+        if not pd.isna(fake_buy_block_price):
+            upper_bound = fake_buy_block_price * (1 + fake_buy_block_pct / 100)
+            lower_bound = fake_buy_block_price * (1 - fake_buy_block_pct / 100)
+            if lower_bound <= close_val <= upper_bound:
+                in_fake_zone = True
+
+        actual_main_buy = df['main_cond'].iloc[i] and not in_fake_zone
+        trend_buy = df['st_buy_cond'].iloc[i]
+        
+        buy_signal = (actual_main_buy or trend_buy) and not trade_active
+
+        if buy_signal:
+            trade_active = True
+            sell_step = 0
+            buy_bar_index = i
+            buy_price = close_val
+            
+            if actual_main_buy:
+                fake_buy_block_price = np.nan
+                sig_main_buy[i] = True
+            else:
+                sig_st_buy[i] = True
+            continue 
+
+        sell_half_once = df['sell_trigger_half_once'].iloc[i]
+        bars_after_buy = (i - buy_bar_index) if buy_bar_index != -1 else 0
+        fast_half_sell = trade_active and (0 < bars_after_buy <= 3) and sell_half_once
+
+        if trade_active and df['st_sell_cond'].iloc[i]:
+            sig_full_sell[i] = True
+            sell_step = 3
+            trade_active = False
+            fake_buy_block_price = buy_price
+        elif trade_active and sell_step <= 1 and (fast_half_sell or sell_half_once):
+            sig_half_sell[i] = True
+            sell_step = 2
+            fake_buy_block_price = buy_price
+
+    df["SIGNAL_MAIN_BUY"] = sig_main_buy
+    df["SIGNAL_ST_BUY"] = sig_st_buy
+    df["SIGNAL_HALF_SELL"] = sig_half_sell
+    df["SIGNAL_FULL_SELL"] = sig_full_sell
     return df
 
 def get_kr_tickers(top_n=400):
-    # 최신 영업일 안전 조회를 위한 실시간 날짜 백업 루프
     for offset in range(0, 4):
         date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
         res = {}
@@ -157,11 +216,19 @@ def get_kr_tickers(top_n=400):
         except: pass
     return {}
 
-def get_us_tickers(top_n=300):
+def get_us_tickers(top_n=600):
     try:
-        table = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
-        syms = table["Symbol"].str.replace(".", "-", regex=False).tolist()[:top_n]
-        return {s: s for s in syms}
+        # S&P 500
+        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        sp500_syms = sp500["Symbol"].str.replace(".", "-", regex=False).tolist()
+        
+        # Nasdaq 100 (추가됨)
+        nasdaq100 = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]
+        nasdaq_syms = nasdaq100["Ticker"].tolist()
+        
+        # 중복 제거 후 합치기
+        combined_syms = list(set(sp500_syms + nasdaq_syms))[:top_n]
+        return {s: s for s in combined_syms}
     except: return {}
 
 if __name__ == "__main__":
@@ -181,46 +248,32 @@ if __name__ == "__main__":
                 if df.empty or len(df) < 10: continue
                 
                 last_price = df.iloc[-1]["Close"]
-                last_ma20 = df.iloc[-1]["ma20"]
-                last_cloud = df.iloc[-1]["cloudTop"]
-                
                 s_type = None
                 detected_days_ago = 0
                 
-                # 최근부터 과거로 역순 검사 (최대 7일)
-                for i in range(1, 8):
+                # 최근 3영업일만 검사 (상태 관리가 들어가서 7일까지 볼 필요 없음)
+                for i in range(1, 4):
                     row = df.iloc[-i]
                     days_ago = i - 1  # 0: 오늘, 1: 1영업일 전
                     
-                    # 과거 시점에 조건이 맞았고, 현재 가격이 여전히 주요 지지선(ma20, cloud) 위에 있는지 확인
-                    if row["BUY"] and (last_price > last_ma20) and (last_price > last_cloud):
-                        s_type = "MAIN BUY"
-                    elif row["ST_BUY"]:
-                        s_type = "ST BUY"
-                    elif row["HALF_SELL"]:
-                        s_type = "1/2 HALF SELL"
-                    elif row["FULL_SELL"]:
-                        s_type = "ST FULL SELL"
+                    if row["SIGNAL_MAIN_BUY"]: s_type = "MAIN BUY"
+                    elif row["SIGNAL_ST_BUY"]: s_type = "ST BUY"
+                    elif row["SIGNAL_HALF_SELL"]: s_type = "1/2 HALF SELL"
+                    elif row["SIGNAL_FULL_SELL"]: s_type = "ST FULL SELL"
                     
-                    # 신호가 발견되면 며칠 전인지 저장하고 루프 중단 (가장 최근 신호만 포착)
                     if s_type:
                         detected_days_ago = days_ago
                         break
                 
                 if s_type: 
-                    # 딕셔너리에 'd' (며칠 전인지) 값 추가
                     found.append({"t": t, "n": name, "s": s_type, "p": last_price, "d": detected_days_ago})
             except: continue
             
         if found:
-            msg = f"🚨 [{MARKET_MODE}] 스캔 결과 (모수 확장 완료)\n{m_status}\n"
+            msg = f"🚨 [{MARKET_MODE}] 스캔 결과 (상태유지 동기화 완료)\n{m_status}\n"
             for s in found:
                 news_txt = "\n".join([f"• {n}" for n in get_news_titles(s['n'], s['t'])])
-                
-                # 며칠 전인지 텍스트 변환
                 day_text = "오늘" if s['d'] == 0 else f"{s['d']}영업일 전"
-                
-                # 디스코드 메시지 포맷 (현재가 밑에 신호발생 추가)
                 msg += f"\n[{s['s']}] {s['n']} ({s['t']})\n💰 현재가: {float(s['p']):.2f}\n⏳ 신호발생: {day_text}\n{news_txt}\n"
             send_discord(msg)
         else: 
