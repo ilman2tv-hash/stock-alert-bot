@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import requests
 import os
+import time
+import json
 import feedparser
 from urllib.parse import quote
 import re
@@ -12,7 +14,7 @@ from datetime import datetime, timedelta
 
 # --- 환경 설정 ---
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-MARKET_MODE = os.getenv("MARKET_MODE", "KR") # "KR", "US", "ALL"
+MARKET_MODE = os.getenv("MARKET_MODE", "US_OPTION") # "KR", "US", "ALL", "US_OPTION"
 
 translator = Translator()
 
@@ -20,9 +22,9 @@ PERIOD = "1y"
 INTERVAL = "1d"
 
 KR_TOP_N = 400  # 코스피 200개 + 코스닥 200개
-US_TOP_N = 600  # S&P 500 + 나스닥 100 스캔 (확장됨)
+US_TOP_N = 600  # S&P 500 + 나스닥 100 
 
-# 슈퍼트렌드 설정 (트레이딩뷰와 동일하게 맞추세요)
+# 슈퍼트렌드 설정
 ST_ATR_PERIOD = 10
 ST_FACTOR = 3.0
 
@@ -79,19 +81,56 @@ def get_news_titles(stock_name, ticker):
 
 def get_high_conf_us_option_signal():
     try:
-        data = yf.download(["SPY", "^VIX", "^PCCR"], period="5d", interval="1d", progress=False)
+        # 데이터 3개월치로 확장
+        data = yf.download(["SPY", "^VIX", "^PCCR"], period="3mo", interval="1d", progress=False)
         close = data["Close"]
-        curr_pccr = float(close["^PCCR"].dropna().iloc[-1])
-        curr_vix = float(close["^VIX"].dropna().iloc[-1])
-        curr_spy = float(close["SPY"].dropna().iloc[-1])
-        prev_spy = float(close["SPY"].dropna().iloc[-2])
-        if curr_pccr < 0.60 and curr_vix < 20 and curr_spy > prev_spy:
-            return f"🔥 **[미국 옵션 상방 신호]** 기관 콜옵션 매수 집중! (PCCR: {curr_pccr:.2f})"
-        elif curr_pccr > 1.10 and curr_vix > 25 and curr_spy < prev_spy:
-            return f"🚨 **[미국 옵션 하방 주의]** 기관 풋옵션 대량 유입! (PCCR: {curr_pccr:.2f})"
-        return None
-    except: return None
+        
+        pccr = close["^PCCR"].dropna()
+        spy = close["SPY"].dropna()
+        vix = close["^VIX"].dropna()
 
+        curr_pccr = float(pccr.iloc[-1])
+        curr_spy = float(spy.iloc[-1])
+        curr_vix = float(vix.iloc[-1])
+        
+        prev3_pccr = float(pccr.iloc[-4])
+        prev3_spy = float(spy.iloc[-4])
+        
+        pccr_ma20 = pccr.rolling(window=20).mean().iloc[-1]
+        spy_ma20 = spy.rolling(window=20).mean().iloc[-1]
+
+        signals = []
+
+        # 변동률 계산 (최근 3영업일)
+        spy_change_pct = (curr_spy - prev3_spy) / prev3_spy * 100
+        pccr_change_pct = (curr_pccr - prev3_pccr) / prev3_pccr * 100
+
+        # [1] 🚨 폭락 전조 경계 (주가 기만 + 풋옵션 매집)
+        if spy_change_pct > -0.5 and pccr_change_pct > 15.0 and curr_pccr > pccr_ma20:
+            signals.append(f"⚠️ **[폭락 전조 경계]** 지수는 버티는데 스마트머니 풋옵션 매집 중!\n"
+                           f"▶ 최근 3일 SPY 변동: {spy_change_pct:.2f}% / PCCR 급등: +{pccr_change_pct:.1f}%")
+                           
+        # [2] 🚀 폭등 전조 경계 (주가 억압 + 콜옵션 매집)
+        elif spy_change_pct < 0.5 and pccr_change_pct < -15.0 and curr_pccr < pccr_ma20:
+            signals.append(f"🚀 **[상승 전환 포착]** 지수는 눌려있는데 스마트머니 콜옵션 매집 중!\n"
+                           f"▶ 최근 3일 SPY 변동: {spy_change_pct:.2f}% / PCCR 급락(콜 우위): {pccr_change_pct:.1f}%")
+
+        # [3] 🧊 하락장 지속 경고 (상승 전환 신호가 없을 때 계속 유지됨)
+        if curr_spy < spy_ma20 and curr_vix > 20:
+            signals.append(f"🧊 **[하락 추세 진행 중]** SPY가 20일선 아래에 있고 VIX가 높습니다.\n"
+                           f"▶ 찐바닥 상승 전환 신호가 뜰 때까지 보수적으로 대응하세요.")
+
+        # [4] 단기 과열/투매 (극단적 역발상 지표)
+        if curr_pccr > 1.25 and curr_pccr > pccr_ma20 * 1.3:
+            signals.append(f"🟢 **[단기 바닥 가능성]** 투매 절정! 극단적 공포 상태 (PCCR: {curr_pccr:.2f})")
+        elif curr_pccr < 0.55 and curr_pccr < pccr_ma20 * 0.7:
+            signals.append(f"🔴 **[단기 천장 주의]** 극단적 탐욕! 콜옵션 과열 (PCCR: {curr_pccr:.2f})")
+
+        return "\n".join(signals) if signals else None
+    except Exception as e:
+        return None
+
+# --- 지표 계산 함수 (기존과 동일, 생략 없이 유지) ---
 def rma(series, length): return series.ewm(alpha=1/length, adjust=False).mean()
 def crossover(a, b): return (a > b) & (a.shift(1) <= b.shift(1))
 def crossunder(a, b): return (a < b) & (a.shift(1) >= b.shift(1))
@@ -100,7 +139,6 @@ def calculate_signals(df):
     df = df.copy()
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     
-    # 1. 기본 지표 계산
     high, low, close = df["High"], df["Low"], df["Close"]
     tr = pd.concat([high-low, (high-close.shift(1)).abs(), (low-close.shift(1)).abs()], axis=1).max(axis=1)
     atr = rma(tr, 14)
@@ -113,13 +151,11 @@ def calculate_signals(df):
     df["obv"] = np.where(df["Close"] > df["Close"].shift(1), df["Volume"], np.where(df["Close"] < df["Close"].shift(1), -df["Volume"], 0)).cumsum()
     df["obvUp"] = df["obv"] > df["obv"].shift(1)
 
-    # 2. 일목균형표
     df["senkouA"] = (((df.High.rolling(9).max() + df.Low.rolling(9).min())/2 + (df.High.rolling(26).max() + df.Low.rolling(26).min())/2)/2).shift(26)
     df["senkouB"] = ((df.High.rolling(52).max() + df.Low.rolling(52).min())/2).shift(26)
     df["cloudTop"] = df[["senkouA", "senkouB"]].max(axis=1)
     df["kijun"] = (df.High.rolling(26).max() + df.Low.rolling(26).min()) / 2
 
-    # 3. 슈퍼트렌드
     hl2 = (df["High"] + df["Low"]) / 2
     atr_st = rma(tr, ST_ATR_PERIOD)
     upper, lower = hl2 + ST_FACTOR * atr_st, hl2 - ST_FACTOR * atr_st
@@ -131,7 +167,6 @@ def calculate_signals(df):
         st.iloc[i] = lower.iloc[i] if dir_st.iloc[i] == -1 else upper.iloc[i]
     df["stDirection"] = dir_st
 
-    # 4. 개별 조건
     df['di_cross_up'] = crossover(df["diplus"], df["diminus"])
     df['di_cross_down'] = crossunder(df["diplus"], df["diminus"])
     df['kijun_cross_down'] = crossunder(df["Close"], df["kijun"])
@@ -142,7 +177,6 @@ def calculate_signals(df):
     df['sell_trigger_half'] = df['di_cross_down'] | df['kijun_cross_down']
     df['sell_trigger_half_once'] = df['sell_trigger_half'] & ~df['sell_trigger_half'].shift(1).fillna(False)
 
-    # 5. 트레이딩뷰와 완전히 동일한 상태 관리 시뮬레이션
     trade_active = False
     sell_step = 0
     buy_bar_index = -1
@@ -156,7 +190,6 @@ def calculate_signals(df):
     for i in range(len(df)):
         close_val = df["Close"].iloc[i]
         
-        # 휩소(가짜 매수) 방지 구역 체크
         in_fake_zone = False
         if not pd.isna(fake_buy_block_price):
             upper_bound = fake_buy_block_price * (1 + fake_buy_block_pct / 100)
@@ -166,7 +199,6 @@ def calculate_signals(df):
 
         actual_main_buy = df['main_cond'].iloc[i] and not in_fake_zone
         trend_buy = df['st_buy_cond'].iloc[i]
-        
         buy_signal = (actual_main_buy or trend_buy) and not trade_active
 
         if buy_signal:
@@ -178,8 +210,7 @@ def calculate_signals(df):
             if actual_main_buy:
                 fake_buy_block_price = np.nan
                 sig_main_buy[i] = True
-            else:
-                sig_st_buy[i] = True
+            else: sig_st_buy[i] = True
             continue 
 
         sell_half_once = df['sell_trigger_half_once'].iloc[i]
@@ -202,6 +233,7 @@ def calculate_signals(df):
     df["SIGNAL_FULL_SELL"] = sig_full_sell
     return df
 
+# --- 종목 스캔 파트 ---
 def get_kr_tickers(top_n=400):
     for offset in range(0, 4):
         date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
@@ -216,61 +248,71 @@ def get_kr_tickers(top_n=400):
         except: pass
     return {}
 
+# 티커 캐싱 적용 (차단 방지)
 def get_us_tickers(top_n=600):
+    cache_file = "us_tickers_cache.json"
+    cache_expiry = 86400 * 7  # 7일
+    if os.path.exists(cache_file):
+        if (time.time() - os.path.getmtime(cache_file)) < cache_expiry:
+            with open(cache_file, "r") as f: return json.load(f)
     try:
-        # S&P 500
         sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
-        sp500_syms = sp500["Symbol"].str.replace(".", "-", regex=False).tolist()
-        
-        # Nasdaq 100 (추가됨)
         nasdaq100 = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]
-        nasdaq_syms = nasdaq100["Ticker"].tolist()
-        
-        # 중복 제거 후 합치기
-        combined_syms = list(set(sp500_syms + nasdaq_syms))[:top_n]
-        return {s: s for s in combined_syms}
-    except: return {}
+        combined = list(set(sp500["Symbol"].str.replace(".", "-", regex=False).tolist() + nasdaq100["Ticker"].tolist()))[:top_n]
+        res = {s: s for s in combined}
+        with open(cache_file, "w") as f: json.dump(res, f)
+        return res
+    except:
+        if os.path.exists(cache_file):
+            with open(cache_file, "r") as f: return json.load(f)
+        return {}
 
 if __name__ == "__main__":
     m_status = get_market_status()
+    
     if MARKET_MODE == "US_OPTION":
         sig = get_high_conf_us_option_signal()
-        if sig: send_discord(f"🇺🇸 **미국 옵션 실시간 이상징후**\n━━━━━━━━━━━━━━━━━━\n{sig}\n{m_status}\n━━━━━━━━━━━━━━━━━━")
+        if sig: send_discord(f"🇺🇸 **미국 옵션 실시간 모니터링**\n━━━━━━━━━━━━━━━━━━\n{sig}\n{m_status}\n━━━━━━━━━━━━━━━━━━")
+        else: send_discord(f"✅ 특이사항 없음\n━━━━━━━━━━━━━━━━━━\n{m_status}")
     else:
         target = {}
         if MARKET_MODE in ["KR", "ALL"]: target.update(get_kr_tickers(KR_TOP_N))
         if MARKET_MODE in ["US", "ALL"]: target.update(get_us_tickers(US_TOP_N))
-        found = []
         
-        for t, name in target.items():
-            try:
-                df = calculate_signals(yf.download(t, period=PERIOD, interval=INTERVAL, progress=False))
-                if df.empty or len(df) < 10: continue
-                
-                last_price = df.iloc[-1]["Close"]
-                s_type = None
-                detected_days_ago = 0
-                
-                # 최근 3영업일만 검사 (상태 관리가 들어가서 7일까지 볼 필요 없음)
-                for i in range(1, 8):
-                    row = df.iloc[-i]
-                    days_ago = i - 1  # 0: 오늘, 1: 1영업일 전
+        found = []
+        tickers_list = list(target.keys())
+        
+        # 벌크 다운로드 (속도 10배 이상 향상)
+        if tickers_list:
+            bulk_df = yf.download(tickers_list, period=PERIOD, interval=INTERVAL, group_by='ticker', progress=False)
+            
+            for t, name in target.items():
+                try:
+                    df = bulk_df[t].dropna() if len(tickers_list) > 1 else bulk_df.copy().dropna()
+                    if df.empty or len(df) < 10: continue
                     
-                    if row["SIGNAL_MAIN_BUY"]: s_type = "MAIN BUY"
-                    elif row["SIGNAL_ST_BUY"]: s_type = "ST BUY"
-                    elif row["SIGNAL_HALF_SELL"]: s_type = "1/2 HALF SELL"
-                    elif row["SIGNAL_FULL_SELL"]: s_type = "ST FULL SELL"
+                    df = calculate_signals(df)
+                    last_price = df.iloc[-1]["Close"]
+                    s_type, detected_days_ago = None, 0
                     
-                    if s_type:
-                        detected_days_ago = days_ago
-                        break
-                
-                if s_type: 
-                    found.append({"t": t, "n": name, "s": s_type, "p": last_price, "d": detected_days_ago})
-            except: continue
+                    for i in range(1, 8):
+                        row = df.iloc[-i]
+                        days_ago = i - 1  
+                        if row["SIGNAL_MAIN_BUY"]: s_type = "MAIN BUY"
+                        elif row["SIGNAL_ST_BUY"]: s_type = "ST BUY"
+                        elif row["SIGNAL_HALF_SELL"]: s_type = "1/2 HALF SELL"
+                        elif row["SIGNAL_FULL_SELL"]: s_type = "ST FULL SELL"
+                        
+                        if s_type:
+                            detected_days_ago = days_ago
+                            break
+                    
+                    if s_type: 
+                        found.append({"t": t, "n": name, "s": s_type, "p": last_price, "d": detected_days_ago})
+                except: continue
             
         if found:
-            msg = f"🚨 [{MARKET_MODE}] 스캔 결과 (상태유지 동기화 완료)\n{m_status}\n"
+            msg = f"🚨 [{MARKET_MODE}] 스캔 결과\n{m_status}\n"
             for s in found:
                 news_txt = "\n".join([f"• {n}" for n in get_news_titles(s['n'], s['t'])])
                 day_text = "오늘" if s['d'] == 0 else f"{s['d']}영업일 전"
