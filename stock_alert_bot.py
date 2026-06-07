@@ -12,8 +12,10 @@ from googletrans import Translator
 from pykrx import stock
 from datetime import datetime, timedelta
 
-# --- 환경 설정 ---
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+# ==========================================
+# 1. 환경 설정 및 상수
+# ==========================================
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 MARKET_MODE = os.getenv("MARKET_MODE", "US_OPTION") # "KR", "US", "ALL", "US_OPTION"
 
 translator = Translator()
@@ -28,6 +30,9 @@ US_TOP_N = 600  # S&P 500 + 나스닥 100
 ST_ATR_PERIOD = 10
 ST_FACTOR = 3.0
 
+# ==========================================
+# 2. 디스코드 및 뉴스 유틸리티
+# ==========================================
 def send_discord(message):
     if not WEBHOOK_URL or "http" not in WEBHOOK_URL:
         return
@@ -36,30 +41,6 @@ def send_discord(message):
         for chunk in chunks:
             requests.post(WEBHOOK_URL, json={"content": chunk}, timeout=15)
     except: pass
-
-def get_market_status():
-    try:
-        data = yf.download(["SPY", "QQQ", "^VIX"], period="3mo", interval="1d", progress=False)
-        if data.empty: return "📊 시장상황: 조회 실패"
-        close = data["Close"]
-        spy = close["SPY"].dropna()
-        qqq = close["QQQ"].dropna()
-        vix = close["^VIX"].dropna()
-        
-        spy_risk_on = spy.ewm(span=10).mean().iloc[-1] > spy.ewm(span=30).mean().iloc[-1]
-        qqq_risk_on = qqq.ewm(span=10).mean().iloc[-1] > qqq.ewm(span=30).mean().iloc[-1]
-        vix_val = float(vix.iloc[-1])
-        
-        score = int(spy_risk_on) + int(qqq_risk_on) + int(vix_val < 20)
-        status = ["위험", "약세", "보통", "매우좋음"][score]
-        vix_status = "안정" if vix_val < 20 else "경계" if vix_val < 30 else "위험"
-        
-        return (f"📊 시장상황: {status}\n"
-                f"🇺🇸 미국시장: {'상승' if spy_risk_on else '약세'}\n"
-                f"💻 기술주: {'상승' if qqq_risk_on else '약세'}\n"
-                f"😱 공포지수: {vix_val:.2f} ({vix_status})")
-    except:
-        return "📊 시장상황: 데이터 부족"
 
 def get_news_titles(stock_name, ticker):
     is_kr = ticker.endswith(".KS") or ticker.endswith(".KQ")
@@ -79,58 +60,107 @@ def get_news_titles(stock_name, ticker):
     except:
         return ["뉴스 검색 오류"]
 
+# ==========================================
+# 3. 시장 상황 대시보드
+# ==========================================
+def get_market_status():
+    try:
+        data = yf.download(["SPY", "QQQ", "^VIX"], period="3mo", interval="1d", progress=False)
+        if data.empty: return "📊 시장상황: 조회 실패"
+        close = data["Close"].ffill().dropna()
+        spy, qqq, vix = close["SPY"], close["QQQ"], close["^VIX"]
+        
+        spy_risk_on = spy.ewm(span=10).mean().iloc[-1] > spy.ewm(span=30).mean().iloc[-1]
+        qqq_risk_on = qqq.ewm(span=10).mean().iloc[-1] > qqq.ewm(span=30).mean().iloc[-1]
+        vix_val = float(vix.iloc[-1])
+        
+        score = int(spy_risk_on) + int(qqq_risk_on) + int(vix_val < 20)
+        status = ["위험", "약세", "보통", "매우좋음"][score]
+        vix_status = "안정" if vix_val < 20 else "경계" if vix_val < 30 else "위험"
+        
+        return (f"📊 시장상황: {status}\n"
+                f"🇺🇸 미국시장: {'상승' if spy_risk_on else '약세'}\n"
+                f"💻 기술주: {'상승' if qqq_risk_on else '약세'}\n"
+                f"😱 공포지수: {vix_val:.2f} ({vix_status})")
+    except:
+        return "📊 시장상황: 데이터 부족"
+
+# ==========================================
+# 4. 기관 옵션 매집(Smart Money) 감지 
+# ==========================================
 def get_high_conf_us_option_signal():
     try:
-        # 데이터 3개월치로 확장
-        data = yf.download(["SPY", "^VIX", "^PCCR"], period="3mo", interval="1d", progress=False)
-        close = data["Close"]
+        # 데이터 수집 (지연 방지를 위해 ffill 사용)
+        data = yf.download(["SPY", "^VIX", "^VVIX", "^SKEW", "^PCCR"], period="3mo", interval="1d", progress=False)
+        close = data["Close"].ffill() 
         
-        pccr = close["^PCCR"].dropna()
         spy = close["SPY"].dropna()
         vix = close["^VIX"].dropna()
+        vvix = close["^VVIX"].dropna()
+        skew = close["^SKEW"].dropna()
+        pccr = close["^PCCR"].dropna()
 
-        curr_pccr = float(pccr.iloc[-1])
+        # 당일 데이터
         curr_spy = float(spy.iloc[-1])
         curr_vix = float(vix.iloc[-1])
+        curr_vvix = float(vvix.iloc[-1])
+        curr_skew = float(skew.iloc[-1])
+        curr_pccr = float(pccr.iloc[-1])
         
-        prev3_pccr = float(pccr.iloc[-4])
-        prev3_spy = float(spy.iloc[-4])
+        # 전일 데이터
+        prev_spy = float(spy.iloc[-2])
+        prev_vvix = float(vvix.iloc[-2])
+        prev_pccr = float(pccr.iloc[-2])
         
-        pccr_ma20 = pccr.rolling(window=20).mean().iloc[-1]
+        # 이동평균
         spy_ma20 = spy.rolling(window=20).mean().iloc[-1]
+        pccr_ma20 = pccr.rolling(window=20).mean().iloc[-1]
+
+        # 1-Day 변동률
+        spy_change_pct = (curr_spy - prev_spy) / prev_spy * 100
+        vvix_change_pct = (curr_vvix - prev_vvix) / prev_vvix * 100
+        pccr_change_pct = (curr_pccr - prev_pccr) / prev_pccr * 100
 
         signals = []
 
-        # 변동률 계산 (최근 3영업일)
-        spy_change_pct = (curr_spy - prev3_spy) / prev3_spy * 100
-        pccr_change_pct = (curr_pccr - prev3_pccr) / prev3_pccr * 100
+        # [1] 하방 폭락 경고 (Risk-Off)
+        if curr_skew >= 135:
+            signals.append(f"🚨 **[블랙스완 경고]** 기관들이 대폭락(Tail Risk) 풋옵션 보험을 대거 체결했습니다!\n"
+                           f"▶ SKEW 위험수위 돌파: {curr_skew:.2f}")
 
-        # [1] 🚨 폭락 전조 경계 (주가 기만 + 풋옵션 매집)
-        if spy_change_pct > -0.5 and pccr_change_pct > 15.0 and curr_pccr > pccr_ma20:
-            signals.append(f"⚠️ **[폭락 전조 경계]** 지수는 버티는데 스마트머니 풋옵션 매집 중!\n"
-                           f"▶ 최근 3일 SPY 변동: {spy_change_pct:.2f}% / PCCR 급등: +{pccr_change_pct:.1f}%")
-                           
-        # [2] 🚀 폭등 전조 경계 (주가 억압 + 콜옵션 매집)
-        elif spy_change_pct < 0.5 and pccr_change_pct < -15.0 and curr_pccr < pccr_ma20:
-            signals.append(f"🚀 **[상승 전환 포착]** 지수는 눌려있는데 스마트머니 콜옵션 매집 중!\n"
-                           f"▶ 최근 3일 SPY 변동: {spy_change_pct:.2f}% / PCCR 급락(콜 우위): {pccr_change_pct:.1f}%")
+        if curr_vvix > 105 and vvix_change_pct > 5.0 and spy_change_pct >= -0.2:
+            signals.append(f"⚠️ **[VIX 선행 급등]** 주가는 방어 중이나 내부 변동성(VVIX)이 치솟고 있습니다.\n"
+                           f"▶ VVIX 스파이크: {curr_vvix:.2f} (전일대비 +{vvix_change_pct:.1f}%)")
 
-        # [3] 🧊 하락장 지속 경고 (상승 전환 신호가 없을 때 계속 유지됨)
-        if curr_spy < spy_ma20 and curr_vix > 20:
-            signals.append(f"🧊 **[하락 추세 진행 중]** SPY가 20일선 아래에 있고 VIX가 높습니다.\n"
-                           f"▶ 찐바닥 상승 전환 신호가 뜰 때까지 보수적으로 대응하세요.")
+        if curr_pccr > 0.95 and pccr_change_pct > 15.0 and spy_change_pct > -0.5:
+            signals.append(f"🛑 **[기만적 풋 매집]** 지수는 버티는데 당일 풋옵션 거래량이 비정상 폭증했습니다.\n"
+                           f"▶ PCCR 당일급등: {curr_pccr:.2f} (+{pccr_change_pct:.1f}%) / 당일 주가방어율: {spy_change_pct:.2f}%")
 
-        # [4] 단기 과열/투매 (극단적 역발상 지표)
+        # [2] 상방 바닥/반등 힌트 (Risk-On)
+        if pccr_change_pct < -15.0 and spy_change_pct < 0.5 and curr_pccr < 0.8:
+            signals.append(f"🚀 **[상승 전환 전조]** 지수는 눌려있으나 스마트머니의 대규모 콜옵션 매집이 포착되었습니다.\n"
+                           f"▶ PCCR 급락(콜 우위): {curr_pccr:.2f} ({pccr_change_pct:.1f}%)")
+
+        if curr_spy < spy_ma20 and curr_vvix < 90 and vvix_change_pct < -5.0:
+            signals.append(f"🟢 **[변동성 압착]** 시장은 아직 약세장이나 VVIX가 선행하여 급락 안정화 중입니다.\n"
+                           f"▶ 하방 압력이 해소되고 반등 랠리가 나올 확률이 높습니다.")
+
         if curr_pccr > 1.25 and curr_pccr > pccr_ma20 * 1.3:
-            signals.append(f"🟢 **[단기 바닥 가능성]** 투매 절정! 극단적 공포 상태 (PCCR: {curr_pccr:.2f})")
-        elif curr_pccr < 0.55 and curr_pccr < pccr_ma20 * 0.7:
-            signals.append(f"🔴 **[단기 천장 주의]** 극단적 탐욕! 콜옵션 과열 (PCCR: {curr_pccr:.2f})")
+            signals.append(f"🩸 **[투매 절정/역발상]** 개미들의 묻지마 풋옵션 패닉 바잉이 절정에 달했습니다.\n"
+                           f"▶ 극단적 공포 상태 (PCCR: {curr_pccr:.2f}). 곧 강력한 숏커버링(상승)이 예상됩니다.")
+
+        # [3] 현금 보유 관망 상태
+        if not signals and curr_spy < spy_ma20 and curr_vix > 20:
+            signals.append(f"🧊 **[하락 추세 진행 중]** 찐바닥 신호가 뜰 때까지 보수적으로 현금 비중을 유지하세요.\n"
+                           f"▶ SPY 20일선 하회 & VIX {curr_vix:.2f}")
 
         return "\n".join(signals) if signals else None
     except Exception as e:
-        return None
+        return f"옵션 스캔 오류: {e}"
 
-# --- 지표 계산 함수 (기존과 동일, 생략 없이 유지) ---
+# ==========================================
+# 5. 메인 지표 계산 (PineScript 로직 완벽 이식)
+# ==========================================
 def rma(series, length): return series.ewm(alpha=1/length, adjust=False).mean()
 def crossover(a, b): return (a > b) & (a.shift(1) <= b.shift(1))
 def crossunder(a, b): return (a < b) & (a.shift(1) >= b.shift(1))
@@ -233,7 +263,9 @@ def calculate_signals(df):
     df["SIGNAL_FULL_SELL"] = sig_full_sell
     return df
 
-# --- 종목 스캔 파트 ---
+# ==========================================
+# 6. 티커 스크랩 함수
+# ==========================================
 def get_kr_tickers(top_n=400):
     for offset in range(0, 4):
         date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
@@ -248,10 +280,9 @@ def get_kr_tickers(top_n=400):
         except: pass
     return {}
 
-# 티커 캐싱 적용 (차단 방지)
 def get_us_tickers(top_n=600):
     cache_file = "us_tickers_cache.json"
-    cache_expiry = 86400 * 7  # 7일
+    cache_expiry = 86400 * 7  
     if os.path.exists(cache_file):
         if (time.time() - os.path.getmtime(cache_file)) < cache_expiry:
             with open(cache_file, "r") as f: return json.load(f)
@@ -267,6 +298,9 @@ def get_us_tickers(top_n=600):
             with open(cache_file, "r") as f: return json.load(f)
         return {}
 
+# ==========================================
+# 7. 메인 실행 (Entry Point)
+# ==========================================
 if __name__ == "__main__":
     m_status = get_market_status()
     
@@ -282,7 +316,6 @@ if __name__ == "__main__":
         found = []
         tickers_list = list(target.keys())
         
-        # 벌크 다운로드 (속도 10배 이상 향상)
         if tickers_list:
             bulk_df = yf.download(tickers_list, period=PERIOD, interval=INTERVAL, group_by='ticker', progress=False)
             
