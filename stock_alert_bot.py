@@ -24,7 +24,21 @@ PERIOD = "1y"
 INTERVAL = "1d"
 
 KR_TOP_N = 400  # 코스피 200개 + 코스닥 200개
-US_TOP_N = 600  # S&P 500 + 나스닥 100 
+US_TOP_N = 600  # S&P 500 + 나스닥 100
+WATCHLIST = [
+    "SMR",
+    "OKLO",
+    "RKLB",
+    "RDW",
+    "ASTS",
+    "CRWV",
+    "NBIS",
+    "IREN",
+    "AAOI",
+    "COHR",
+    "HIMS",
+    "LUNR"
+]
 
 # 슈퍼트렌드 설정
 ST_ATR_PERIOD = 10
@@ -158,6 +172,60 @@ def get_high_conf_us_option_signal():
     except Exception as e:
         return f"옵션 스캔 오류: {e}"
 
+def get_watchlist_option_signals():
+
+    result = []
+
+    for ticker in WATCHLIST:
+
+        try:
+            tk = yf.Ticker(ticker)
+
+            if len(tk.options) == 0:
+                continue
+
+            exp = tk.options[0]
+            chain = tk.option_chain(exp)
+
+            call_vol = chain.calls["volume"].fillna(0).sum()
+            put_vol = chain.puts["volume"].fillna(0).sum()
+
+            call_oi = chain.calls["openInterest"].fillna(0).sum()
+            put_oi = chain.puts["openInterest"].fillna(0).sum()
+
+            if call_vol < 100:
+                continue
+
+            pcr = put_vol / max(call_vol, 1)
+
+            if pcr > 1.5:
+                result.append(
+                    f"🔴 {ticker} 강한 풋매집\n"
+                    f"P/C={pcr:.2f}"
+                )
+
+            elif pcr > 1.2:
+                result.append(
+                    f"🚨 {ticker} 선행위험\n"
+                    f"P/C={pcr:.2f}"
+                )
+
+            elif pcr > 1.0:
+                result.append(
+                    f"🛑 {ticker} 기만적 풋매집 가능\n"
+                    f"P/C={pcr:.2f}"
+                )
+
+            elif pcr < 0.5 and call_oi > put_oi:
+                result.append(
+                    f"🚀 {ticker} 콜매집\n"
+                    f"P/C={pcr:.2f}"
+                )
+
+        except:
+            pass
+
+    return result
 # ==========================================
 # 5. 메인 지표 계산 (PineScript 로직 완벽 이식)
 # ==========================================
@@ -304,10 +372,27 @@ def get_us_tickers(top_n=600):
 if __name__ == "__main__":
     m_status = get_market_status()
     
-    if MARKET_MODE == "US_OPTION":
-        sig = get_high_conf_us_option_signal()
-        if sig: send_discord(f"🇺🇸 **미국 옵션 실시간 모니터링**\n━━━━━━━━━━━━━━━━━━\n{sig}\n{m_status}\n━━━━━━━━━━━━━━━━━━")
-        else: send_discord(f"✅ 특이사항 없음\n━━━━━━━━━━━━━━━━━━\n{m_status}")
+if MARKET_MODE == "US_OPTION":
+
+    market_sig = get_high_conf_us_option_signal()
+    stock_sig = get_watchlist_option_signals()
+
+    msg = "🇺🇸 미국 옵션 실시간 모니터링\n"
+    msg += "━━━━━━━━━━━━━━━━━━\n"
+
+    if market_sig:
+        msg += market_sig + "\n\n"
+
+    if stock_sig:
+        msg += "📈 관심종목 옵션감시\n"
+        msg += "\n\n".join(stock_sig)
+        msg += "\n\n"
+
+    msg += m_status
+    msg += "\n━━━━━━━━━━━━━━━━━━"
+
+    send_discord(msg)
+    
     else:
         target = {}
         if MARKET_MODE in ["KR", "ALL"]: target.update(get_kr_tickers(KR_TOP_N))
