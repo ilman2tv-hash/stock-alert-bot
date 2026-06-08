@@ -124,4 +124,4 @@ def get_high_conf_us_option_signal():
 
         spy_change_pct = (curr_spy - prev_spy) / prev_spy * 100
         vvix_change_pct = (curr_vvix - prev_vvix) / prev_vvix * 100
-        pccr_change_pct = (curr_pccr - prev_pccr) /
+        pccr_change_pct = (curr_pccr - prev_pccr) / prev_pccr * 100
