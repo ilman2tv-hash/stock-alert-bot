@@ -100,68 +100,89 @@ def get_market_status():
 # ==========================================
 def get_high_conf_us_option_signal():
     try:
-        data = yf.download(["SPY", "^VIX", "^VVIX", "^SKEW", "^PCCR"], period="3mo", interval="1d", progress=False)
+        # 야후 파이낸스에서 정상 작동하는 시장 지수 지표들만 스캔 (^PCCR 제거)
+        data = yf.download(["SPY", "^VIX", "^VVIX", "^SKEW"], period="3mo", interval="1d", progress=False)
+        if data.empty:
+            return "⚠️ 전체시장 주요 옵션 지수 데이터 부족"
+
         close = data["Close"].ffill() 
-        
         spy = close["SPY"].dropna()
         vix = close["^VIX"].dropna()
         vvix = close["^VVIX"].dropna()
         skew = close["^SKEW"].dropna()
-        pccr = close["^PCCR"].dropna()
 
         curr_spy = float(spy.iloc[-1])
         curr_vix = float(vix.iloc[-1])
         curr_vvix = float(vvix.iloc[-1])
         curr_skew = float(skew.iloc[-1])
-        curr_pccr = float(pccr.iloc[-1])
         
         prev_spy = float(spy.iloc[-2])
         prev_vvix = float(vvix.iloc[-2])
-        prev_pccr = float(pccr.iloc[-2])
         
         spy_ma20 = spy.rolling(window=20).mean().iloc[-1]
-        pccr_ma20 = pccr.rolling(window=20).mean().iloc[-1]
 
         spy_change_pct = (curr_spy - prev_spy) / prev_spy * 100
         vvix_change_pct = (curr_vvix - prev_vvix) / prev_vvix * 100
-        pccr_change_pct = (curr_pccr - prev_pccr) / prev_pccr * 100
 
-        signals = []
+        # 데이터가 고장 난 지수 대신, 시장 전체를 대변하는 SPY의 실제 옵션 체인에서 실시간 PCR 계산
+        curr_pccr = 0.8
+        try:
+            spy_tk = yf.Ticker("SPY")
+            if len(spy_tk.options) > 0:
+                exp = spy_tk.options[0]
+                chain = spy_tk.option_chain(exp)
+                call_vol = chain.calls["volume"].fillna(0).sum()
+                put_vol = chain.puts["volume"].fillna(0).sum()
+                curr_pccr = put_vol / max(call_vol, 1)
+        except Exception as opt_e:
+            print(f"SPY 옵션 체인 파싱 실패: {opt_e}")
+
+        # 알림 메시지 빌드 (데이터 현황판은 365일 언제나 출력되도록 보장)
+        signals = [
+            f"📊 **[전체시장 옵션 현황]**",
+            f"• 시장 풋/콜 비율 (SPY PCR): {curr_pccr:.2f}",
+            f"• 블랙스완 헤지 지수 (SKEW): {curr_skew:.2f}",
+            f"• 변동성 지수 (VIX): {curr_vix:.2f} / (VVIX): {curr_vvix:.2f}",
+            f"━━━━━━━━━━━━━━━━━━",
+            f"🔎 **[특이 신호 감지 결과]**"
+        ]
+
+        has_alert = False
 
         if curr_skew >= 135:
-            signals.append(f"🚨 **[블랙스완 경고]** 기관들이 대폭락(Tail Risk) 풋옵션 보험을 대거 체결했습니다!\n"
-                           f"▶ SKEW 위험수위 돌파: {curr_skew:.2f}")
+            has_alert = True
+            signals.append(f"🚨 **[블랙스완 경고]** 기관들이 대폭락(Tail Risk) 풋옵션 보험을 대거 체결했습니다!\n▶ SKEW 위험수위 돌파: {curr_skew:.2f}")
 
         if curr_vvix > 105 and vvix_change_pct > 5.0 and spy_change_pct >= -0.2:
-            signals.append(f"⚠️ **[VIX 선행 급등]** 주가는 방어 중이나 내부 변동성(VVIX)이 치솟고 있습니다.\n"
-                           f"▶ VVIX 스파이크: {curr_vvix:.2f} (전일대비 +{vvix_change_pct:.1f}%)")
+            has_alert = True
+            signals.append(f"⚠️ **[VIX 선행 급등]** 주가는 방어 중이나 내부 변동성(VVIX)이 치솟고 있습니다.\n▶ VVIX 스파이크: {curr_vvix:.2f} (전일대비 +{vvix_change_pct:.1f}%)")
 
-        if curr_pccr > 0.95 and pccr_change_pct > 15.0 and spy_change_pct > -0.5:
-            signals.append(f"🛑 **[기만적 풋 매집]** 지수는 버티는데 당일 풋옵션 거래량이 비정상 폭증했습니다.\n"
-                           f"▶ PCCR 당일급등: {curr_pccr:.2f} (+{pccr_change_pct:.1f}%) / 당일 주가방어율: {spy_change_pct:.2f}%")
-
-        if pccr_change_pct < -15.0 and spy_change_pct < 0.5 and curr_pccr < 0.8:
-            signals.append(f"🚀 **[상승 전환 전조]** 지수는 눌려있으나 스마트머니의 대규모 콜옵션 매집이 포착되었습니다.\n"
-                           f"▶ PCCR 급락(콜 우위): {curr_pccr:.2f} ({pccr_change_pct:.1f}%)")
+        if curr_pccr > 1.3:
+            has_alert = True
+            signals.append(f"🩸 **[투매 절정/역발상]** 시장 전체의 풋옵션 패닉 바잉이 극단적 수준입니다.\n▶ 극단적 공포 상태 (PCR: {curr_pccr:.2f}). 강력한 숏커버링 반등 가능성 존재.")
+        elif curr_pccr > 0.95 and spy_change_pct > -0.5:
+            has_alert = True
+            signals.append(f"🛑 **[기만적 풋 매집]** 지수는 버티는데 당일 시장 풋옵션 거래량 비중이 비정상 폭증했습니다.\n▶ 시장 PCR: {curr_pccr:.2f} / 당일 주가방어율: {spy_change_pct:.2f}%")
+        elif curr_pccr < 0.5:
+            has_alert = True
+            signals.append(f"🚀 **[상승 전환 전조]** 지수 흐름 대비 스마트머니의 강력한 콜옵션 매집이 우세합니다.\n▶ 시장 PCR (콜 우위): {curr_pccr:.2f}")
 
         if curr_spy < spy_ma20 and curr_vvix < 90 and vvix_change_pct < -5.0:
-            signals.append(f"🟢 **[변동성 압착]** 시장은 아직 약세장이나 VVIX가 선행하여 급락 안정화 중입니다.\n"
-                           f"▶ 하방 압력이 해소되고 반등 랠리가 나올 확률이 높습니다.")
+            has_alert = True
+            signals.append(f"🟢 **[변동성 압착]** 시장은 아직 약세장이나 VVIX가 선행하여 급락 안정화 중입니다.\n▶ 하방 압력이 해소되고 반등 랠리가 나올 확률이 높습니다.")
 
-        if curr_pccr > 1.25 and curr_pccr > pccr_ma20 * 1.3:
-            signals.append(f"🩸 **[투매 절정/역발상]** 개미들의 묻지마 풋옵션 패닉 바잉이 절정에 달했습니다.\n"
-                           f"▶ 극단적 공포 상태 (PCCR: {curr_pccr:.2f}). 곧 강력한 숏커버링(상승)이 예상됩니다.")
+        # 특이 과열 신호가 없을 때의 안전 브리핑 멘트 추가
+        if not has_alert:
+            if curr_spy < spy_ma20 and curr_vix > 20:
+                signals.append(f"🧊 **[하락 추세 진행 중]** 전체적인 시장 리스크가 잔존하므로 보수적인 포지션을 권장합니다. (SPY 20일선 하회)")
+            else:
+                signals.append(f"✅ 현재 전체시장 옵션 지표에서 특이 변동성 폭발이나 급격한 쏠림 징후가 없는 무난한 상태입니다.")
 
-        if not signals and curr_spy < spy_ma20 and curr_vix > 20:
-            signals.append(f"🧊 **[하락 추세 진행 중]** 찐바닥 신호가 뜰 때까지 보수적으로 현금 비중을 유지하세요.\n"
-                           f"▶ SPY 20일선 하회 & VIX {curr_vix:.2f}")
+        return "\n".join(signals)
 
-        return "\n".join(signals) if signals else None
-
-    # 예외처리(except) 블록을 try와 정확히 짝맞춰 복구했습니다.
     except Exception as e:
         print(f"옵션 스캔 오류: {e}")
-        return f"옵션 스캔 오류: {e}"
+        return f"⚠️ 전체시장 옵션 스캔 중 오류 발생: {e}"
 
 def get_watchlist_option_signals():
     result = []
@@ -194,7 +215,6 @@ def get_watchlist_option_signals():
             elif pcr < 0.5 and call_oi > put_oi:
                 result.append(f"🚀 {ticker} 콜매집\nP/C={pcr:.2f}")
             
-            # API 제한 방지를 위한 짧은 휴식 추가
             time.sleep(0.5) 
 
         except Exception as e:
