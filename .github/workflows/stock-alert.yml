@@ -16,10 +16,8 @@ on:
           - US_OPTION
           - ALL
   schedule:
-    # 한국시간(KST) 새벽 2시 (UTC 전날 17시)
-    - cron: '0 17 * * *'
-    # 한국시간(KST) 아침 9시 (UTC 0시)
-    - cron: '0 0 * * *'
+    # 한국시간(KST) 밤 11시, 자정(12시), 새벽 1시 정각 (UTC 14, 15, 16시)
+    - cron: '0 14,15,16 * * *'
 
 jobs:
   build:
@@ -32,14 +30,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 기존의 job 단위 env 할당 대신, 스텝에서 이벤트를 구분해 동적으로 환경변수 설정
       - name: Determine MARKET_MODE
         run: |
           if [ "${{ github.event_name }}" == "schedule" ]; then
-            # 스케줄러(새벽 2시, 아침 9시)로 실행된 경우 US_OPTION 강제 할당
             echo "MARKET_MODE=US_OPTION" >> $GITHUB_ENV
           else
-            # 수동(workflow_dispatch)이나 외부(repository_dispatch) 실행인 경우 입력값 우선
             echo "MARKET_MODE=${{ github.event.client_payload.market || github.event.inputs.market || 'KR' }}" >> $GITHUB_ENV
           fi
 
