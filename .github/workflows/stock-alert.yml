@@ -7,7 +7,7 @@ on:
     inputs:
       market:
         description: 'Market mode'
-        required: true
+        required: false
         default: 'KR'
         type: choice
         options:
@@ -15,11 +15,6 @@ on:
           - US
           - US_OPTION
           - ALL
-  schedule:
-    # 1. 한국시간(KST) 아침 9시 7분 (UTC 0시 7분)
-    - cron: '7 0 * * *'
-    # 2. 한국시간(KST) 밤 11시 13분, 자정 12시 13분, 새벽 1시 13분 (UTC 14, 15, 16시 13분)
-    - cron: '13 14,15,16 * * *'
 
 jobs:
   build:
@@ -34,11 +29,7 @@ jobs:
 
       - name: Determine MARKET_MODE
         run: |
-          if [ "${{ github.event_name }}" == "schedule" ]; then
-            echo "MARKET_MODE=US_OPTION" >> $GITHUB_ENV
-          else
-            echo "MARKET_MODE=${{ github.event.client_payload.market || github.event.inputs.market || 'KR' }}" >> $GITHUB_ENV
-          fi
+          echo "MARKET_MODE=${{ github.event.client_payload.market || github.event.inputs.market || 'KR' }}" >> $GITHUB_ENV
 
       - name: Set up Python
         uses: actions/setup-python@v5
