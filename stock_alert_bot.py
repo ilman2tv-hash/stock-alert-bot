@@ -27,7 +27,7 @@ KR_TOP_N = 400  # 코스피 200개 + 코스닥 200개
 US_TOP_N = 600  # S&P 500 + 나스닥 100
 WATCHLIST = [
     "SMR", "OKLO", "RKLB", "RDW", "ASTS", "CRWV",
-    "NBIS", "IREN", "AAOI", "COHR", "HIMS", "LUNR"
+    "NBIS", "IREN", "AAOI", "COHR", "HIMS", "LUNR", "NTRA"
 ]
 
 # 슈퍼트렌드 설정
