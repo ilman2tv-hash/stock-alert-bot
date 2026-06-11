@@ -100,7 +100,6 @@ def get_market_status():
 # ==========================================
 def get_high_conf_us_option_signal():
     try:
-        # 야후 파이낸스에서 정상 작동하는 시장 지수 지표들만 스캔 (^PCCR 제거)
         data = yf.download(["SPY", "^VIX", "^VVIX", "^SKEW"], period="3mo", interval="1d", progress=False)
         if data.empty:
             return "⚠️ 전체시장 주요 옵션 지수 데이터 부족"
@@ -120,12 +119,13 @@ def get_high_conf_us_option_signal():
         prev_vvix = float(vvix.iloc[-2])
         
         spy_ma20 = spy.rolling(window=20).mean().iloc[-1]
-
         spy_change_pct = (curr_spy - prev_spy) / prev_spy * 100
         vvix_change_pct = (curr_vvix - prev_vvix) / prev_vvix * 100
 
-        # 데이터가 고장 난 지수 대신, 시장 전체를 대변하는 SPY의 실제 옵션 체인에서 실시간 PCR 계산
-        curr_pccr = 0.8
+        # [핵심 변경점] 강제 0.8 하드코딩 제거, 장전 판별 로직 추가
+        curr_pccr = None 
+        is_market_closed = False
+
         try:
             spy_tk = yf.Ticker("SPY")
             if len(spy_tk.options) > 0:
@@ -133,19 +133,32 @@ def get_high_conf_us_option_signal():
                 chain = spy_tk.option_chain(exp)
                 call_vol = chain.calls["volume"].fillna(0).sum()
                 put_vol = chain.puts["volume"].fillna(0).sum()
-                curr_pccr = put_vol / max(call_vol, 1)
+                
+                if call_vol == 0 and put_vol == 0:
+                    is_market_closed = True
+                else:
+                    curr_pccr = put_vol / max(call_vol, 1)
+            else:
+                is_market_closed = True
         except Exception as opt_e:
             print(f"SPY 옵션 체인 파싱 실패: {opt_e}")
 
-        # 알림 메시지 빌드 (데이터 현황판은 365일 언제나 출력되도록 보장)
-        signals = [
-            f"📊 **[전체시장 옵션 현황]**",
-            f"• 시장 풋/콜 비율 (SPY PCR): {curr_pccr:.2f}",
-            f"• 블랙스완 헤지 지수 (SKEW): {curr_skew:.2f}",
-            f"• 변동성 지수 (VIX): {curr_vix:.2f} / (VVIX): {curr_vvix:.2f}",
-            f"━━━━━━━━━━━━━━━━━━",
-            f"🔎 **[특이 신호 감지 결과]**"
-        ]
+        signals = [f"📊 **[전체시장 옵션 현황]**"]
+        
+        if is_market_closed or curr_pccr is None:
+            signals.append("• 시장 풋/콜 비율 (SPY PCR): ⏳ 미국 본장 개장 전 (데이터 없음)")
+            signals.append(f"• 블랙스완 헤지 지수 (SKEW): {curr_skew:.2f}")
+            signals.append(f"• 변동성 지수 (VIX): {curr_vix:.2f} / (VVIX): {curr_vvix:.2f}")
+            signals.append(f"━━━━━━━━━━━━━━━━━━")
+            signals.append(f"🔎 **[특이 신호 감지 결과]**")
+            signals.append(f"💤 현재 미국 프리마켓 시간대이므로 실시간 옵션 체인이 활성화되지 않았습니다. 본장(오후 10:30 이후)에 데이터를 확인하세요.")
+            return "\n".join(signals)
+
+        signals.append(f"• 시장 풋/콜 비율 (SPY PCR): {curr_pccr:.2f}")
+        signals.append(f"• 블랙스완 헤지 지수 (SKEW): {curr_skew:.2f}")
+        signals.append(f"• 변동성 지수 (VIX): {curr_vix:.2f} / (VVIX): {curr_vvix:.2f}")
+        signals.append(f"━━━━━━━━━━━━━━━━━━")
+        signals.append(f"🔎 **[특이 신호 감지 결과]**")
 
         has_alert = False
 
@@ -171,7 +184,6 @@ def get_high_conf_us_option_signal():
             has_alert = True
             signals.append(f"🟢 **[변동성 압착]** 시장은 아직 약세장이나 VVIX가 선행하여 급락 안정화 중입니다.\n▶ 하방 압력이 해소되고 반등 랠리가 나올 확률이 높습니다.")
 
-        # 특이 과열 신호가 없을 때의 안전 브리핑 멘트 추가
         if not has_alert:
             if curr_spy < spy_ma20 and curr_vix > 20:
                 signals.append(f"🧊 **[하락 추세 진행 중]** 전체적인 시장 리스크가 잔존하므로 보수적인 포지션을 권장합니다. (SPY 20일선 하회)")
@@ -197,6 +209,9 @@ def get_watchlist_option_signals():
 
             call_vol = chain.calls["volume"].fillna(0).sum()
             put_vol = chain.puts["volume"].fillna(0).sum()
+
+            if call_vol == 0 and put_vol == 0:
+                continue
 
             call_oi = chain.calls["openInterest"].fillna(0).sum()
             put_oi = chain.puts["openInterest"].fillna(0).sum()
@@ -254,7 +269,7 @@ def calculate_signals(df):
     hl2 = (df["High"] + df["Low"]) / 2
     atr_st = rma(tr, ST_ATR_PERIOD)
     upper, lower = hl2 + ST_FACTOR * atr_st, hl2 - ST_FACTOR * atr_st
-    st, dir_st = upper.copy(), pd.Series(1, index=df.index)
+    st, dir_st = pd.Series(upper, index=df.index), pd.Series(1, index=df.index)
     for i in range(1, len(df)):
         if df["Close"].iloc[i] > st.iloc[i-1]: dir_st.iloc[i] = -1
         elif df["Close"].iloc[i] < st.iloc[i-1]: dir_st.iloc[i] = 1
@@ -367,16 +382,17 @@ def get_us_tickers(top_n=600):
         return {}
 
 # ==========================================
-# 7. 메인 실행 (Entry Point)
+# 7. 메인 실행 (Cron 1회 실행용 단일 구조)
 # ==========================================
 if __name__ == "__main__":
+    current_time_str = datetime.now().strftime("%H:%M")
     m_status = get_market_status()
     
     if MARKET_MODE == "US_OPTION":
         market_sig = get_high_conf_us_option_signal()
         stock_sig = get_watchlist_option_signals()
 
-        msg = "🇺🇸 미국 옵션 실시간 모니터링\n"
+        msg = f"🇺🇸 미국 옵션 실시간 모니터링 ({current_time_str} 실행)\n"
         msg += "━━━━━━━━━━━━━━━━━━\n"
 
         if market_sig:
@@ -427,15 +443,14 @@ if __name__ == "__main__":
                     if s_type: 
                         found.append({"t": t, "n": name, "s": s_type, "p": last_price, "d": detected_days_ago})
                 except Exception as e: 
-                    print(f"신호 계산 오류 ({t}): {e}")
                     continue
             
         if found:
-            msg = f"🚨 [{MARKET_MODE}] 스캔 결과\n{m_status}\n"
+            msg = f"🚨 [{MARKET_MODE}] 스캔 결과 ({current_time_str})\n{m_status}\n"
             for s in found:
                 news_txt = "\n".join([f"• {n}" for n in get_news_titles(s['n'], s['t'])])
                 day_text = "오늘" if s['d'] == 0 else f"{s['d']}영업일 전"
                 msg += f"\n[{s['s']}] {s['n']} ({s['t']})\n💰 현재가: {float(s['p']):.2f}\n⏳ 신호발생: {day_text}\n{news_txt}\n"
             send_discord(msg)
         else: 
-            send_discord(f"✅ [{MARKET_MODE}] 시장 스캔 완료\n{m_status}\n현재 특이 신호 종목 없음")
+            send_discord(f"✅ [{MARKET_MODE}] 시장 스캔 완료 ({current_time_str})\n{m_status}\n현재 특이 신호 종목 없음")
