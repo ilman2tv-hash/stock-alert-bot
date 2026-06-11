@@ -10,7 +10,8 @@ from urllib.parse import quote
 import re
 from googletrans import Translator
 from pykrx import stock
-from datetime import datetime, timedelta
+# [수정] timezone을 추가로 import 합니다.
+from datetime import datetime, timedelta, timezone
 
 # ==========================================
 # 1. 환경 설정 및 상수
@@ -122,7 +123,6 @@ def get_high_conf_us_option_signal():
         spy_change_pct = (curr_spy - prev_spy) / prev_spy * 100
         vvix_change_pct = (curr_vvix - prev_vvix) / prev_vvix * 100
 
-        # [핵심 변경점] 강제 0.8 하드코딩 제거, 장전 판별 로직 추가
         curr_pccr = None 
         is_market_closed = False
 
@@ -385,7 +385,10 @@ def get_us_tickers(top_n=600):
 # 7. 메인 실행 (Cron 1회 실행용 단일 구조)
 # ==========================================
 if __name__ == "__main__":
-    current_time_str = datetime.now().strftime("%H:%M")
+    # [수정] 한국 시간대(KST = UTC+9)를 생성하고 적용하여 구동합니다.
+    kst = timezone(timedelta(hours=9))
+    current_time_str = datetime.now(kst).strftime("%H:%M")
+    
     m_status = get_market_status()
     
     if MARKET_MODE == "US_OPTION":
