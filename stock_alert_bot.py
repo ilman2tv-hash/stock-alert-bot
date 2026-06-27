@@ -5,490 +5,102 @@ import requests
 import os
 import time
 import json
-import feedparser
-from urllib.parse import quote
-import re
-from googletrans import Translator
-from pykrx import stock
 from datetime import datetime, timedelta, timezone
 
 # ==========================================
-# 1. 환경 설정 및 상수
+# 1. 설정
 # ==========================================
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
-MARKET_MODE = os.getenv("MARKET_MODE", "US_OPTION") # "KR", "US", "ALL", "US_OPTION"
 
-translator = Translator()
-
-PERIOD = "1y"
-INTERVAL = "1d"
-
-KR_TOP_N = 400  # 코스피 200개 + 코스닥 200개
-US_TOP_N = 600  # S&P 500 + 나스닥 100
-WATCHLIST = [
-    "SMR", "OKLO", "RKLB", "RDW", "ASTS", "CRWV",
-    "NBIS", "IREN", "AAOI", "COHR", "HIMS", "LUNR", "NTRA"
-]
-
-# 슈퍼트렌드 설정
-ST_ATR_PERIOD = 10
-ST_FACTOR = 3.0
-
-# ==========================================
-# 2. 디스코드 및 뉴스 유틸리티
-# ==========================================
 def send_discord(message):
-    if not WEBHOOK_URL or "http" not in WEBHOOK_URL:
-        print("Webhook URL이 설정되지 않았습니다.")
-        return
+    if not WEBHOOK_URL: return
     try:
         chunks = [message[i:i + 1900] for i in range(0, len(message), 1900)]
-        for chunk in chunks:
-            requests.post(WEBHOOK_URL, json={"content": chunk}, timeout=15)
-    except Exception as e:
-        print(f"Discord 전송 실패: {e}")
+        for chunk in chunks: requests.post(WEBHOOK_URL, json={"content": chunk}, timeout=15)
+    except Exception as e: print(f"Discord 전송 실패: {e}")
 
-def get_news_titles(stock_name, ticker):
-    is_kr = ticker.endswith(".KS") or ticker.endswith(".KQ")
-    query = quote(f"{stock_name} 주식" if is_kr else f"{stock_name} stock")
-    lang = "ko-KR" if is_kr else "en-US"
-    rss_url = f"https://news.google.com/rss/search?q={query}&hl={lang}&gl={lang[:2].upper()}&ceid={lang[:2].upper()}:{lang[3:]}"
+# ==========================================
+# 2. 1단계: 깔때기 필터 (미국 우량주 600개 중 차트 후보 발굴)
+# ==========================================
+def get_candidate_tickers():
     try:
-        feed = feedparser.parse(rss_url)
-        titles = []
-        for entry in feed.entries[:3]:
-            t = re.sub(r"\s-\s.+$", "", entry.title).strip()
-            if not is_kr:
-                try: 
-                    t = translator.translate(t, dest="ko").text
-                except Exception as e:
-                    print(f"번역 오류 ({ticker}): {e}")
-            titles.append(t)
-        return titles if titles else ["관련 뉴스 없음"]
-    except Exception as e:
-        print(f"뉴스 검색 오류 ({ticker}): {e}")
-        return ["뉴스 검색 오류"]
-
-# ==========================================
-# 3. 시장 상황 대시보드
-# ==========================================
-def get_market_status():
-    try:
-        data = yf.download(["SPY", "QQQ", "^VIX"], period="3mo", interval="1d", progress=False)
-        if data.empty: return "📊 시장상황: 조회 실패"
-        close = data["Close"].ffill().dropna()
-        spy, qqq, vix = close["SPY"], close["QQQ"], close["^VIX"]
+        # S&P500 + Nasdaq100 종목 가져오기
+        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]['Symbol'].tolist()
+        nasdaq100 = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]['Ticker'].tolist()
+        tickers = list(set(sp500 + nasdaq100))[:600]
         
-        spy_risk_on = spy.ewm(span=10).mean().iloc[-1] > spy.ewm(span=30).mean().iloc[-1]
-        qqq_risk_on = qqq.ewm(span=10).mean().iloc[-1] > qqq.ewm(span=30).mean().iloc[-1]
-        vix_val = float(vix.iloc[-1])
+        # 주가 데이터만 가볍게 다운로드 (속도 최적화)
+        data = yf.download(tickers, period="30d", group_by='ticker', progress=False)
+        candidates = []
         
-        score = int(spy_risk_on) + int(qqq_risk_on) + int(vix_val < 20)
-        status = ["위험", "약세", "보통", "매우좋음"][score]
-        vix_status = "안정" if vix_val < 20 else "경계" if vix_val < 30 else "위험"
-        
-        return (f"📊 시장상황: {status}\n"
-                f"🇺🇸 미국시장: {'상승' if spy_risk_on else '약세'}\n"
-                f"💻 기술주: {'상승' if qqq_risk_on else '약세'}\n"
-                f"😱 공포지수: {vix_val:.2f} ({vix_status})")
-    except Exception as e:
-        print(f"시장 상황 조회 오류: {e}")
-        return "📊 시장상황: 데이터 부족"
-
-# ==========================================
-# 4. 기관 옵션 매집(Smart Money) 감지 (미결제약정 중심 고도화)
-# ==========================================
-def get_high_conf_us_option_signal():
-    try:
-        data = yf.download(["SPY", "^VIX", "^VVIX", "^SKEW"], period="3mo", interval="1d", progress=False)
-        if data.empty:
-            return "⚠️ 전체시장 주요 옵션 지수 데이터 부족"
-
-        close = data["Close"].ffill() 
-        spy = close["SPY"].dropna()
-        vix = close["^VIX"].dropna()
-        vvix = close["^VVIX"].dropna()
-        skew = close["^SKEW"].dropna()
-
-        curr_spy = float(spy.iloc[-1])
-        curr_vix = float(vix.iloc[-1])
-        curr_vvix = float(vvix.iloc[-1])
-        curr_skew = float(skew.iloc[-1])
-        
-        prev_spy = float(spy.iloc[-2])
-        prev_vvix = float(vvix.iloc[-2])
-        
-        spy_ma20 = spy.rolling(window=20).mean().iloc[-1]
-        spy_change_pct = (curr_spy - prev_spy) / prev_spy * 100
-        vvix_change_pct = (curr_vvix - prev_vvix) / prev_vvix * 100
-
-        curr_pccr = None 
-        # [업그레이드] 장 개장 여부와 상관없이 누적 미결제약정(OI) 기준으로 PCR 계산
-        try:
-            spy_tk = yf.Ticker("SPY")
-            if len(spy_tk.options) > 0:
-                exp = spy_tk.options[0]
-                chain = spy_tk.option_chain(exp)
-                # 당일 소멸성 Volume 대신 세력의 계약인 Open Interest 취합
-                call_oi = chain.calls["openInterest"].fillna(0).sum()
-                put_oi = chain.puts["openInterest"].fillna(0).sum()
+        for t in tickers:
+            try:
+                df = data[t].dropna()
+                if len(df) < 20: continue
                 
-                if call_oi > 0 or put_oi > 0:
-                    curr_pccr = put_oi / max(call_oi, 1)
-        except Exception as opt_e:
-            print(f"SPY 옵션 체인 파싱 실패: {opt_e}")
-
-        signals = [f"📊 **[전체시장 옵션 현황]**"]
-        
-        if curr_pccr is None:
-            signals.append("• 시장 누적 풋/콜 비율 (SPY OI PCR): ⏳ 데이터 수집 실패")
-        else:
-            signals.append(f"• 시장 누적 풋/콜 비율 (SPY OI PCR): {curr_pccr:.2f}")
-            
-        signals.append(f"• 블랙스완 헤지 지수 (SKEW): {curr_skew:.2f}")
-        signals.append(f"• 변동성 지수 (VIX): {curr_vix:.2f} / (VVIX): {curr_vvix:.2f}")
-        signals.append(f"━━━━━━━━━━━━━━━━━━")
-        signals.append(f"🔎 **[특이 신호 감지 결과]**")
-
-        has_alert = False
-
-        if curr_skew >= 135:
-            has_alert = True
-            signals.append(f"🚨 **[블랙스완 경고]** 기관들이 대폭락(Tail Risk) 풋옵션 보험을 대거 체결했습니다!\n▶ SKEW 위험수위 돌파: {curr_skew:.2f}")
-
-        if curr_vvix > 105 and vvix_change_pct > 5.0 and spy_change_pct >= -0.2:
-            has_alert = True
-            signals.append(f"⚠️ **[VIX 선행 급등]** 주가는 방어 중이나 내부 변동성(VVIX)이 치솟고 있습니다.\n▶ VVIX 스파이크: {curr_vvix:.2f} (전일대비 +{vvix_change_pct:.1f}%)")
-
-        if curr_pccr is not None:
-            if curr_pccr > 1.3:
-                has_alert = True
-                signals.append(f"🩸 **[투매 절정/역발상]** 시장 전체의 누적 풋옵션 물량이 극단적 수준입니다.\n▶ 강력한 숏커버링 반등 가능성 존재 (OI PCR: {curr_pccr:.2f})")
-            elif curr_pccr > 0.95 and spy_change_pct > -0.5:
-                has_alert = True
-                signals.append(f"🛑 **[기만적 풋 매집]** 지수는 버티는데 세력의 누적 풋옵션 계약 비중이 폭증했습니다.\n▶ 시장 OI PCR: {curr_pccr:.2f} / 당일 주가방어율: {spy_change_pct:.2f}%")
-            elif curr_pccr < 0.5:
-                has_alert = True
-                signals.append(f"🚀 **[상승 전환 전조]** 지수 흐름 대비 스마트머니의 강력한 콜옵션 누적 매집이 우세합니다.\n▶ 시장 OI PCR (콜 우위): {curr_pccr:.2f}")
-
-        if curr_spy < spy_ma20 and curr_vvix < 90 and vvix_change_pct < -5.0:
-            has_alert = True
-            signals.append(f"🟢 **[변동성 압착]** 시장은 아직 약세장이나 VVIX가 선행하여 급락 안정화 중입니다.\n▶ 하방 압력이 해소되고 반등 랠리가 나올 확률이 높습니다.")
-
-        if not has_alert:
-            if curr_spy < spy_ma20 and curr_vix > 20:
-                signals.append(f"🧊 **[하락 추세 진행 중]** 전체적인 시장 리스크가 잔존하므로 보수적인 포지션을 권장합니다. (SPY 20일선 하회)")
-            else:
-                signals.append(f"✅ 현재 전체시장 옵션 지표에서 특이 변동성 폭발이나 급격한 쏠림 징후가 없는 무난한 상태입니다.")
-
-        return "\n".join(signals)
-
-    except Exception as e:
-        print(f"옵션 스캔 오류: {e}")
-        return f"⚠️ 전체시장 옵션 스캔 중 오류 발생: {e}"
-
-def get_watchlist_option_signals():
-    result = []
-    for ticker in WATCHLIST:
-        try:
-            tk = yf.Ticker(ticker)
-            if len(tk.options) == 0:
-                continue
-
-            # 만기가 가장 임박한(Weekly 포함 일주일 내외) 단기 옵션 체인 추적
-            exp = tk.options[0]
-            chain = tk.option_chain(exp)
-
-            calls = chain.calls.fillna(0)
-            puts = chain.puts.fillna(0)
-
-            total_call_oi = calls["openInterest"].sum()
-            total_put_oi = puts["openInterest"].sum()
-
-            # 거래 대금 및 옵션 시장 관심도가 현저히 낮은 종목 필터링
-            if total_call_oi < 300 and total_put_oi < 300: 
-                continue
-
-            # 누적 미결제약정 비율 계산 (후행성 거래량 배제)
-            oi_pcr = total_put_oi / max(total_call_oi, 1)
-
-            # 최근 주가 및 20일 이동평균선 상태 분석
-            hist = tk.history(period="30d")
-            if len(hist) < 20:
-                continue
-
-            prev_close = hist["Close"].iloc[-2]
-            curr_close = hist["Close"].iloc[-1]
-            ma20 = hist["Close"].rolling(20).mean().iloc[-1]
-            price_change_pct = ((curr_close - prev_close) / prev_close) * 100
-
-            # 🎯 [콜옵션 행사가 집중 분석] 현재 주가 위쪽(외가격) 중 세력이 가장 크게 그물 쳐둔 곳
-            otm_calls = calls[calls["strike"] > curr_close]
-            if not otm_calls.empty:
-                max_call_oi_row = otm_calls.loc[otm_calls["openInterest"].idxmax()]
-                target_call_strike = max_call_oi_row["strike"]     
-                target_call_oi = max_call_oi_row["openInterest"]   
-                call_concentration = (target_call_oi / total_call_oi) * 100
-            else:
-                target_call_strike, call_concentration = 0, 0
-
-            # 🎯 [풋옵션 행사가 집중 분석] 현재 주가 아래쪽 중 세력이 하방 작전 그물 쳐둔 곳
-            otm_puts = puts[puts["strike"] < curr_close]
-            if not otm_puts.empty:
-                max_put_oi_row = otm_puts.loc[otm_puts["openInterest"].idxmax()]
-                target_put_strike = max_put_oi_row["strike"]     
-                target_put_oi = max_put_oi_row["openInterest"]   
-                put_concentration = (target_put_oi / total_put_oi) * 100
-            else:
-                target_put_strike, put_concentration = 0, 0
-
-            # 🌟 [알림 1] 세력의 조용한 상방 목표가 포착 (훈님 맞춤 로직)
-            # 조건: 주가는 조용히 쉬어가고(-1.5% ~ +1.0%), 추세(20일선)가 살아있는데 콜 OI 압도 및 특정 가격 쏠림
-            if oi_pcr < 0.5 and curr_close >= ma20 and -1.5 <= price_change_pct <= 1.0:
-                if call_concentration >= 25.0: 
-                    result.append(
-                        f"🔥 **{ticker} [세력 단기 목표가 포착!]**\n"
-                        f"• 현재 주가: ${curr_close:.2f} ({price_change_pct:.2f}%)\n"
-                        f"• 추세 상태: 🟢 20일선 위 유지 중 (안전한 눌림목)\n"
-                        f"• 세력의 선택: 🎯 **${target_call_strike:.2f}짜리 티켓 대량 매집** (콜옵션 {call_concentration:.1f}% 몰빵)\n"
-                        f"• 💡 내일 대응: 세력이 상방 목표가를 확실히 장전해 두었습니다. 내일 본장 진입 적극 고려!"
-                    )
-
-            # 🌟 [알림 2] 세력의 은밀한 하방 작전 포착 (조기 탈출/역발상용 풋매집)
-            # 조건: 주가는 보합인데 풋 OI가 2배 이상 압도하고, 아래쪽 특정 행사가에 그물이 몰빵되었을 때
-            elif oi_pcr > 2.0 and -1.0 <= price_change_pct <= 1.5:
-                if put_concentration >= 25.0:
-                    result.append(
-                        f"⚠️ **{ticker} [세력 하방 지뢰 매설!]**\n"
-                        f"• 현재 주가: ${curr_close:.2f} ({price_change_pct:.2f}%)\n"
-                        f"• 추세 상태: 🚨 주가는 조용하나 하방 헤지/공격 포지션 유입\n"
-                        f"• 세력의 흑심: 📉 **${target_put_strike:.2f}짜리 풋티켓 몰빵** (풋옵션 {put_concentration:.1f}% 폭발)\n"
-                        f"• 💡 내일 대응: 세력들이 아래쪽 폭락에 보험이나 작전 그물을 쳤습니다. 보유자는 조심!"
-                    )
-
-            time.sleep(0.5)
-
-        except Exception as e:
-            print(f"Watchlist OI 업그레이드 오류 ({ticker}): {e}")
-            continue
-
-    return result
+                curr_close = df["Close"].iloc[-1]
+                ma20 = df["Close"].rolling(20).mean().iloc[-1]
+                # 20일선 근처거나 아래에 있는 종목들만 필터링 (바닥권 + 눌림목)
+                if curr_close < ma20 * 1.1: 
+                    candidates.append(t)
+            except: continue
+        return candidates
+    except: return []
 
 # ==========================================
-# 5. 메인 지표 계산 (PineScript 로직 완벽 이식)
+# 3. 2단계: 옵션 정밀 분석 (세력 돋보기)
 # ==========================================
-def rma(series, length): return series.ewm(alpha=1/length, adjust=False).mean()
-def crossover(a, b): return (a > b) & (a.shift(1) <= b.shift(1))
-def crossunder(a, b): return (a < b) & (a.shift(1) >= b.shift(1))
-
-def calculate_signals(df):
-    df = df.copy()
-    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-    
-    high, low, close = df["High"], df["Low"], df["Close"]
-    tr = pd.concat([high-low, (high-close.shift(1)).abs(), (low-close.shift(1)).abs()], axis=1).max(axis=1)
-    atr = rma(tr, 14)
-    up, down = high.diff(), -low.diff()
-    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
-    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
-    df["diplus"] = 100 * rma(pd.Series(plus_dm, index=df.index), 14) / atr
-    df["diminus"] = 100 * rma(pd.Series(minus_dm, index=df.index), 14) / atr
-    df["ma20"] = df["Close"].rolling(20).mean()
-    df["obv"] = np.where(df["Close"] > df["Close"].shift(1), df["Volume"], np.where(df["Close"] < df["Close"].shift(1), -df["Volume"], 0)).cumsum()
-    df["obvUp"] = df["obv"] > df["obv"].shift(1)
-
-    df["senkouA"] = (((df.High.rolling(9).max() + df.Low.rolling(9).min())/2 + (df.High.rolling(26).max() + df.Low.rolling(26).min())/2)/2).shift(26)
-    df["senkouB"] = ((df.High.rolling(52).max() + df.Low.rolling(52).min())/2).shift(26)
-    df["cloudTop"] = df[["senkouA", "senkouB"]].max(axis=1)
-    df["kijun"] = (df.High.rolling(26).max() + df.Low.rolling(26).min()) / 2
-
-    hl2 = (df["High"] + df["Low"]) / 2
-    atr_st = rma(tr, ST_ATR_PERIOD)
-    upper, lower = hl2 + ST_FACTOR * atr_st, hl2 - ST_FACTOR * atr_st
-    st, dir_st = pd.Series(upper, index=df.index), pd.Series(1, index=df.index)
-    for i in range(1, len(df)):
-        if df["Close"].iloc[i] > st.iloc[i-1]: dir_st.iloc[i] = -1
-        elif df["Close"].iloc[i] < st.iloc[i-1]: dir_st.iloc[i] = 1
-        else: dir_st.iloc[i] = dir_st.iloc[i-1]
-        st.iloc[i] = lower.iloc[i] if dir_st.iloc[i] == -1 else upper.iloc[i]
-    df["stDirection"] = dir_st
-
-    df['di_cross_up'] = crossover(df["diplus"], df["diminus"])
-    df['di_cross_down'] = crossunder(df["diplus"], df["diminus"])
-    df['kijun_cross_down'] = crossunder(df["Close"], df["kijun"])
-
-    df['main_cond'] = df['di_cross_up'] & df['obvUp'] & (df['Close'] > df['ma20']) & (df['Close'] > df['cloudTop'])
-    df['st_buy_cond'] = (df["stDirection"] < 0) & (df["stDirection"].shift(1) > 0)
-    df['st_sell_cond'] = (df["stDirection"] > 0) & (df["stDirection"].shift(1) < 0)
-    df['sell_trigger_half'] = df['di_cross_down'] | df['kijun_cross_down']
-    df['sell_trigger_half_once'] = df['sell_trigger_half'] & ~df['sell_trigger_half'].shift(1).fillna(False)
-
-    trade_active = False
-    sell_step = 0
-    buy_bar_index = -1
-    buy_price = np.nan
-    fake_buy_block_price = np.nan
-    fake_buy_block_pct = 5.0
-
-    sig_main_buy, sig_st_buy = [False]*len(df), [False]*len(df)
-    sig_half_sell, sig_full_sell = [False]*len(df), [False]*len(df)
-
-    for i in range(len(df)):
-        close_val = df["Close"].iloc[i]
-        
-        in_fake_zone = False
-        if not pd.isna(fake_buy_block_price):
-            upper_bound = fake_buy_block_price * (1 + fake_buy_block_pct / 100)
-            lower_bound = fake_buy_block_price * (1 - fake_buy_block_pct / 100)
-            if lower_bound <= close_val <= upper_bound:
-                in_fake_zone = True
-
-        actual_main_buy = df['main_cond'].iloc[i] and not in_fake_zone
-        trend_buy = df['st_buy_cond'].iloc[i]
-        buy_signal = (actual_main_buy or trend_buy) and not trade_active
-
-        if buy_signal:
-            trade_active = True
-            sell_step = 0
-            buy_bar_index = i
-            buy_price = close_val
-            
-            if actual_main_buy:
-                fake_buy_block_price = np.nan
-                sig_main_buy[i] = True
-            else: sig_st_buy[i] = True
-            continue 
-
-        sell_half_once = df['sell_trigger_half_once'].iloc[i]
-        bars_after_buy = (i - buy_bar_index) if buy_bar_index != -1 else 0
-        fast_half_sell = trade_active and (0 < bars_after_buy <= 3) and sell_half_once
-
-        if trade_active and df['st_sell_cond'].iloc[i]:
-            sig_full_sell[i] = True
-            sell_step = 3
-            trade_active = False
-            fake_buy_block_price = buy_price
-        elif trade_active and sell_step <= 1 and (fast_half_sell or sell_half_once):
-            sig_half_sell[i] = True
-            sell_step = 2
-            fake_buy_block_price = buy_price
-
-    df["SIGNAL_MAIN_BUY"] = sig_main_buy
-    df["SIGNAL_ST_BUY"] = sig_st_buy
-    df["SIGNAL_HALF_SELL"] = sig_half_sell
-    df["SIGNAL_FULL_SELL"] = sig_full_sell
-    return df
-
-# ==========================================
-# 6. 티커 스크랩 함수
-# ==========================================
-def get_kr_tickers(top_n=400):
-    for offset in range(0, 4):
-        date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
-        res = {}
-        try:
-            df = stock.get_market_cap_by_ticker(date, market="KOSPI")
-            if not df.empty:
-                for m, s in [("KOSPI", ".KS"), ("KOSDAQ", ".KQ")]:
-                    sub_df = stock.get_market_cap_by_ticker(date, market=m).sort_values("거래대금", ascending=False).head(top_n//2)
-                    for c in sub_df.index: res[f"{c}{s}"] = stock.get_market_ticker_name(c)
-                return res
-        except Exception as e:
-            print(f"KR Ticker 스크랩 오류: {e}")
-            pass
-    return {}
-
-def get_us_tickers(top_n=600):
-    cache_file = "us_tickers_cache.json"
-    cache_expiry = 86400 * 7  
-    if os.path.exists(cache_file):
-        if (time.time() - os.path.getmtime(cache_file)) < cache_expiry:
-            with open(cache_file, "r") as f: return json.load(f)
+def analyze_options(ticker):
     try:
-        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
-        nasdaq100 = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]
-        combined = list(set(sp500["Symbol"].str.replace(".", "-", regex=False).tolist() + nasdaq100["Ticker"].tolist()))[:top_n]
-        res = {s: s for s in combined}
-        with open(cache_file, "w") as f: json.dump(res, f)
-        return res
-    except Exception as e:
-        print(f"US Ticker 스크랩 오류: {e}")
-        if os.path.exists(cache_file):
-            with open(cache_file, "r") as f: return json.load(f)
-        return {}
+        tk = yf.Ticker(ticker)
+        if not tk.options: return None
+        
+        chain = tk.option_chain(tk.options[0])
+        calls, puts = chain.calls.fillna(0), chain.puts.fillna(0)
+        
+        total_call_oi, total_put_oi = calls["openInterest"].sum(), puts["openInterest"].sum()
+        if total_call_oi < 500: return None
+        
+        oi_pcr = total_put_oi / max(total_call_oi, 1)
+        hist = tk.history(period="1mo")
+        curr_close, ma20 = hist["Close"].iloc[-1], hist["Close"].rolling(20).mean().iloc[-1]
+        pct = ((curr_close - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2]) * 100
+        
+        # 타깃 분석
+        otm_calls = calls[calls["strike"] > curr_close]
+        if not otm_calls.empty:
+            best_call = otm_calls.loc[otm_calls["openInterest"].idxmax()]
+            call_conc = (best_call["openInterest"] / total_call_oi) * 100
+        else: return None
+
+        # [투트랙 조건]
+        if oi_pcr < 0.5:
+            # 눌림목 패턴
+            if (curr_close >= ma20 * 0.98) and (-2.0 <= pct <= 2.0) and call_conc >= 20.0:
+                return f"📈 **{ticker} [세력 눌림목 매집]** 🎯 목표가 ${best_call['strike']:.2f} (집중도 {call_conc:.1f}%)"
+            # 바닥 패턴
+            elif (curr_close < ma20) and (-5.0 <= pct <= 1.5) and call_conc >= 25.0:
+                return f"🔥 **{ticker} [지하실 반격 매집]** 🎯 목표가 ${best_call['strike']:.2f} (집중도 {call_conc:.1f}%)"
+        return None
+    except: return None
 
 # ==========================================
-# 7. 메인 실행 (Cron 1회 실행용 단일 구조)
+# 4. 메인 실행
 # ==========================================
 if __name__ == "__main__":
-    kst = timezone(timedelta(hours=9))
-    current_time_str = datetime.now(kst).strftime("%H:%M")
+    print("스캔 시작...")
+    candidates = get_candidate_tickers()
+    msg = f"🚀 **미국 우량주 세력 엑기스 발굴 ({len(candidates)}개 후보 중)**\n"
     
-    m_status = get_market_status()
-    
-    if MARKET_MODE == "US_OPTION":
-        market_sig = get_high_conf_us_option_signal()
-        stock_sig = get_watchlist_option_signals()
-
-        msg = f"🇺🇸 미국 옵션 세력 매집 모니터링 ({current_time_str} 실행)\n"
-        msg += "━━━━━━━━━━━━━━━━━━\n"
-
-        if market_sig:
-            msg += market_sig + "\n\n"
-
-        if stock_sig:
-            msg += "📈 관심종목 옵션감시 (미결제약정 집중분석)\n"
-            msg += "\n\n".join(stock_sig)
-            msg += "\n\n"
-
-        msg += m_status
-        msg += "\n━━━━━━━━━━━━━━━━━━"
-
-        send_discord(msg)
+    found = []
+    for t in candidates[:100]: # 서버 부하 방지를 위해 상위 100개만 정밀 분석
+        res = analyze_options(t)
+        if res: found.append(res)
+        time.sleep(0.3)
         
+    if found:
+        msg += "\n".join(found)
     else:
-        target = {}
-        if MARKET_MODE in ["KR", "ALL"]: target.update(get_kr_tickers(KR_TOP_N))
-        if MARKET_MODE in ["US", "ALL"]: target.update(get_us_tickers(US_TOP_N))
+        msg += "현재 조건에 맞는 매집 종목 없음."
         
-        found = []
-        tickers_list = list(target.keys())
-        
-        if tickers_list:
-            bulk_df = yf.download(tickers_list, period=PERIOD, interval=INTERVAL, group_by='ticker', progress=False)
-            
-            for t, name in target.items():
-                try:
-                    df = bulk_df[t].dropna() if len(tickers_list) > 1 else bulk_df.copy().dropna()
-                    if df.empty or len(df) < 10: continue
-                    
-                    df = calculate_signals(df)
-                    last_price = df.iloc[-1]["Close"]
-                    s_type, detected_days_ago = None, 0
-                    
-                    for i in range(1, 8):
-                        row = df.iloc[-i]
-                        days_ago = i - 1  
-                        if row["SIGNAL_MAIN_BUY"]: s_type = "MAIN BUY"
-                        elif row["SIGNAL_ST_BUY"]: s_type = "ST BUY"
-                        elif row["SIGNAL_HALF_SELL"]: s_type = "1/2 HALF SELL"
-                        elif row["SIGNAL_FULL_SELL"]: s_type = "ST FULL SELL"
-                        
-                        if s_type:
-                            detected_days_ago = days_ago
-                            break
-                    
-                    if s_type: 
-                        found.append({"t": t, "n": name, "s": s_type, "p": last_price, "d": detected_days_ago})
-                except Exception as e: 
-                    continue
-            
-        if found:
-            msg = f"🚨 [{MARKET_MODE}] 스캔 결과 ({current_time_str})\n{m_status}\n"
-            for s in found:
-                news_txt = "\n".join([f"• {n}" for n in get_news_titles(s['n'], s['t'])])
-                day_text = "오늘" if s['d'] == 0 else f"{s['d']}영업일 전"
-                msg += f"\n[{s['s']}] {s['n']} ({s['t']})\n💰 현재가: {float(s['p']):.2f}\n⏳ 신호발생: {day_text}\n{news_txt}\n"
-            send_discord(msg)
-        else: 
-            send_discord(f"✅ [{MARKET_MODE}] 시장 스캔 완료 ({current_time_str})\n{m_status}\n현재 특이 신호 종목 없음")
+    send_discord(msg)
