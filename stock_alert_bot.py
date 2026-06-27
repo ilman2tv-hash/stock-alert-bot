@@ -10,7 +10,6 @@ from urllib.parse import quote
 import re
 from googletrans import Translator
 from pykrx import stock
-# [수정] timezone을 추가로 import 합니다.
 from datetime import datetime, timedelta, timezone
 
 # ==========================================
@@ -97,7 +96,7 @@ def get_market_status():
         return "📊 시장상황: 데이터 부족"
 
 # ==========================================
-# 4. 기관 옵션 매집(Smart Money) 감지 
+# 4. 기관 옵션 매집(Smart Money) 감지 (미결제약정 중심 고도화)
 # ==========================================
 def get_high_conf_us_option_signal():
     try:
@@ -124,37 +123,28 @@ def get_high_conf_us_option_signal():
         vvix_change_pct = (curr_vvix - prev_vvix) / prev_vvix * 100
 
         curr_pccr = None 
-        is_market_closed = False
-
+        # [업그레이드] 장 개장 여부와 상관없이 누적 미결제약정(OI) 기준으로 PCR 계산
         try:
             spy_tk = yf.Ticker("SPY")
             if len(spy_tk.options) > 0:
                 exp = spy_tk.options[0]
                 chain = spy_tk.option_chain(exp)
-                call_vol = chain.calls["volume"].fillna(0).sum()
-                put_vol = chain.puts["volume"].fillna(0).sum()
+                # 당일 소멸성 Volume 대신 세력의 계약인 Open Interest 취합
+                call_oi = chain.calls["openInterest"].fillna(0).sum()
+                put_oi = chain.puts["openInterest"].fillna(0).sum()
                 
-                if call_vol == 0 and put_vol == 0:
-                    is_market_closed = True
-                else:
-                    curr_pccr = put_vol / max(call_vol, 1)
-            else:
-                is_market_closed = True
+                if call_oi > 0 or put_oi > 0:
+                    curr_pccr = put_oi / max(call_oi, 1)
         except Exception as opt_e:
             print(f"SPY 옵션 체인 파싱 실패: {opt_e}")
 
         signals = [f"📊 **[전체시장 옵션 현황]**"]
         
-        if is_market_closed or curr_pccr is None:
-            signals.append("• 시장 풋/콜 비율 (SPY PCR): ⏳ 미국 본장 개장 전 (데이터 없음)")
-            signals.append(f"• 블랙스완 헤지 지수 (SKEW): {curr_skew:.2f}")
-            signals.append(f"• 변동성 지수 (VIX): {curr_vix:.2f} / (VVIX): {curr_vvix:.2f}")
-            signals.append(f"━━━━━━━━━━━━━━━━━━")
-            signals.append(f"🔎 **[특이 신호 감지 결과]**")
-            signals.append(f"💤 현재 미국 프리마켓 시간대이므로 실시간 옵션 체인이 활성화되지 않았습니다. 본장(오후 10:30 이후)에 데이터를 확인하세요.")
-            return "\n".join(signals)
-
-        signals.append(f"• 시장 풋/콜 비율 (SPY PCR): {curr_pccr:.2f}")
+        if curr_pccr is None:
+            signals.append("• 시장 누적 풋/콜 비율 (SPY OI PCR): ⏳ 데이터 수집 실패")
+        else:
+            signals.append(f"• 시장 누적 풋/콜 비율 (SPY OI PCR): {curr_pccr:.2f}")
+            
         signals.append(f"• 블랙스완 헤지 지수 (SKEW): {curr_skew:.2f}")
         signals.append(f"• 변동성 지수 (VIX): {curr_vix:.2f} / (VVIX): {curr_vvix:.2f}")
         signals.append(f"━━━━━━━━━━━━━━━━━━")
@@ -170,15 +160,16 @@ def get_high_conf_us_option_signal():
             has_alert = True
             signals.append(f"⚠️ **[VIX 선행 급등]** 주가는 방어 중이나 내부 변동성(VVIX)이 치솟고 있습니다.\n▶ VVIX 스파이크: {curr_vvix:.2f} (전일대비 +{vvix_change_pct:.1f}%)")
 
-        if curr_pccr > 1.3:
-            has_alert = True
-            signals.append(f"🩸 **[투매 절정/역발상]** 시장 전체의 풋옵션 패닉 바잉이 극단적 수준입니다.\n▶ 극단적 공포 상태 (PCR: {curr_pccr:.2f}). 강력한 숏커버링 반등 가능성 존재.")
-        elif curr_pccr > 0.95 and spy_change_pct > -0.5:
-            has_alert = True
-            signals.append(f"🛑 **[기만적 풋 매집]** 지수는 버티는데 당일 시장 풋옵션 거래량 비중이 비정상 폭증했습니다.\n▶ 시장 PCR: {curr_pccr:.2f} / 당일 주가방어율: {spy_change_pct:.2f}%")
-        elif curr_pccr < 0.5:
-            has_alert = True
-            signals.append(f"🚀 **[상승 전환 전조]** 지수 흐름 대비 스마트머니의 강력한 콜옵션 매집이 우세합니다.\n▶ 시장 PCR (콜 우위): {curr_pccr:.2f}")
+        if curr_pccr is not None:
+            if curr_pccr > 1.3:
+                has_alert = True
+                signals.append(f"🩸 **[투매 절정/역발상]** 시장 전체의 누적 풋옵션 물량이 극단적 수준입니다.\n▶ 강력한 숏커버링 반등 가능성 존재 (OI PCR: {curr_pccr:.2f})")
+            elif curr_pccr > 0.95 and spy_change_pct > -0.5:
+                has_alert = True
+                signals.append(f"🛑 **[기만적 풋 매집]** 지수는 버티는데 세력의 누적 풋옵션 계약 비중이 폭증했습니다.\n▶ 시장 OI PCR: {curr_pccr:.2f} / 당일 주가방어율: {spy_change_pct:.2f}%")
+            elif curr_pccr < 0.5:
+                has_alert = True
+                signals.append(f"🚀 **[상승 전환 전조]** 지수 흐름 대비 스마트머니의 강력한 콜옵션 누적 매집이 우세합니다.\n▶ 시장 OI PCR (콜 우위): {curr_pccr:.2f}")
 
         if curr_spy < spy_ma20 and curr_vvix < 90 and vvix_change_pct < -5.0:
             has_alert = True
@@ -204,36 +195,81 @@ def get_watchlist_option_signals():
             if len(tk.options) == 0:
                 continue
 
+            # 만기가 가장 임박한(Weekly 포함 일주일 내외) 단기 옵션 체인 추적
             exp = tk.options[0]
             chain = tk.option_chain(exp)
 
-            call_vol = chain.calls["volume"].fillna(0).sum()
-            put_vol = chain.puts["volume"].fillna(0).sum()
+            calls = chain.calls.fillna(0)
+            puts = chain.puts.fillna(0)
 
-            if call_vol == 0 and put_vol == 0:
+            total_call_oi = calls["openInterest"].sum()
+            total_put_oi = puts["openInterest"].sum()
+
+            # 거래 대금 및 옵션 시장 관심도가 현저히 낮은 종목 필터링
+            if total_call_oi < 300 and total_put_oi < 300: 
                 continue
 
-            call_oi = chain.calls["openInterest"].fillna(0).sum()
-            put_oi = chain.puts["openInterest"].fillna(0).sum()
+            # 누적 미결제약정 비율 계산 (후행성 거래량 배제)
+            oi_pcr = total_put_oi / max(total_call_oi, 1)
 
-            if call_vol < 100:
+            # 최근 주가 및 20일 이동평균선 상태 분석
+            hist = tk.history(period="30d")
+            if len(hist) < 20:
                 continue
 
-            pcr = put_vol / max(call_vol, 1)
+            prev_close = hist["Close"].iloc[-2]
+            curr_close = hist["Close"].iloc[-1]
+            ma20 = hist["Close"].rolling(20).mean().iloc[-1]
+            price_change_pct = ((curr_close - prev_close) / prev_close) * 100
 
-            if pcr > 1.5:
-                result.append(f"🔴 {ticker} 강한 풋매집\nP/C={pcr:.2f}")
-            elif pcr > 1.2:
-                result.append(f"🚨 {ticker} 선행위험\nP/C={pcr:.2f}")
-            elif pcr > 1.0:
-                result.append(f"🛑 {ticker} 기만적 풋매집 가능\nP/C={pcr:.2f}")
-            elif pcr < 0.5 and call_oi > put_oi:
-                result.append(f"🚀 {ticker} 콜매집\nP/C={pcr:.2f}")
-            
-            time.sleep(0.5) 
+            # 🎯 [콜옵션 행사가 집중 분석] 현재 주가 위쪽(외가격) 중 세력이 가장 크게 그물 쳐둔 곳
+            otm_calls = calls[calls["strike"] > curr_close]
+            if not otm_calls.empty:
+                max_call_oi_row = otm_calls.loc[otm_calls["openInterest"].idxmax()]
+                target_call_strike = max_call_oi_row["strike"]     
+                target_call_oi = max_call_oi_row["openInterest"]   
+                call_concentration = (target_call_oi / total_call_oi) * 100
+            else:
+                target_call_strike, call_concentration = 0, 0
+
+            # 🎯 [풋옵션 행사가 집중 분석] 현재 주가 아래쪽 중 세력이 하방 작전 그물 쳐둔 곳
+            otm_puts = puts[puts["strike"] < curr_close]
+            if not otm_puts.empty:
+                max_put_oi_row = otm_puts.loc[otm_puts["openInterest"].idxmax()]
+                target_put_strike = max_put_oi_row["strike"]     
+                target_put_oi = max_put_oi_row["openInterest"]   
+                put_concentration = (target_put_oi / total_put_oi) * 100
+            else:
+                target_put_strike, put_concentration = 0, 0
+
+            # 🌟 [알림 1] 세력의 조용한 상방 목표가 포착 (훈님 맞춤 로직)
+            # 조건: 주가는 조용히 쉬어가고(-1.5% ~ +1.0%), 추세(20일선)가 살아있는데 콜 OI 압도 및 특정 가격 쏠림
+            if oi_pcr < 0.5 and curr_close >= ma20 and -1.5 <= price_change_pct <= 1.0:
+                if call_concentration >= 25.0: 
+                    result.append(
+                        f"🔥 **{ticker} [세력 단기 목표가 포착!]**\n"
+                        f"• 현재 주가: ${curr_close:.2f} ({price_change_pct:.2f}%)\n"
+                        f"• 추세 상태: 🟢 20일선 위 유지 중 (안전한 눌림목)\n"
+                        f"• 세력의 선택: 🎯 **${target_call_strike:.2f}짜리 티켓 대량 매집** (콜옵션 {call_concentration:.1f}% 몰빵)\n"
+                        f"• 💡 내일 대응: 세력이 상방 목표가를 확실히 장전해 두었습니다. 내일 본장 진입 적극 고려!"
+                    )
+
+            # 🌟 [알림 2] 세력의 은밀한 하방 작전 포착 (조기 탈출/역발상용 풋매집)
+            # 조건: 주가는 보합인데 풋 OI가 2배 이상 압도하고, 아래쪽 특정 행사가에 그물이 몰빵되었을 때
+            elif oi_pcr > 2.0 and -1.0 <= price_change_pct <= 1.5:
+                if put_concentration >= 25.0:
+                    result.append(
+                        f"⚠️ **{ticker} [세력 하방 지뢰 매설!]**\n"
+                        f"• 현재 주가: ${curr_close:.2f} ({price_change_pct:.2f}%)\n"
+                        f"• 추세 상태: 🚨 주가는 조용하나 하방 헤지/공격 포지션 유입\n"
+                        f"• 세력의 흑심: 📉 **${target_put_strike:.2f}짜리 풋티켓 몰빵** (풋옵션 {put_concentration:.1f}% 폭발)\n"
+                        f"• 💡 내일 대응: 세력들이 아래쪽 폭락에 보험이나 작전 그물을 쳤습니다. 보유자는 조심!"
+                    )
+
+            time.sleep(0.5)
 
         except Exception as e:
-            print(f"Watchlist 조회 오류 ({ticker}): {e}")
+            print(f"Watchlist OI 업그레이드 오류 ({ticker}): {e}")
             continue
 
     return result
@@ -385,7 +421,6 @@ def get_us_tickers(top_n=600):
 # 7. 메인 실행 (Cron 1회 실행용 단일 구조)
 # ==========================================
 if __name__ == "__main__":
-    # [수정] 한국 시간대(KST = UTC+9)를 생성하고 적용하여 구동합니다.
     kst = timezone(timedelta(hours=9))
     current_time_str = datetime.now(kst).strftime("%H:%M")
     
@@ -395,14 +430,14 @@ if __name__ == "__main__":
         market_sig = get_high_conf_us_option_signal()
         stock_sig = get_watchlist_option_signals()
 
-        msg = f"🇺🇸 미국 옵션 실시간 모니터링 ({current_time_str} 실행)\n"
+        msg = f"🇺🇸 미국 옵션 세력 매집 모니터링 ({current_time_str} 실행)\n"
         msg += "━━━━━━━━━━━━━━━━━━\n"
 
         if market_sig:
             msg += market_sig + "\n\n"
 
         if stock_sig:
-            msg += "📈 관심종목 옵션감시\n"
+            msg += "📈 관심종목 옵션감시 (미결제약정 집중분석)\n"
             msg += "\n\n".join(stock_sig)
             msg += "\n\n"
 
