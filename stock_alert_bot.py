@@ -1,92 +1,150 @@
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import requests
 import os
 import time
+import requests
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from pykrx import stock
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+MARKET_MODE = os.getenv("MARKET_MODE", "KR")
 
 
 # =========================
-# 1. 디스코드 전송
+# Discord
 # =========================
-def send_discord(message):
+def send_discord(msg):
     if not WEBHOOK_URL:
         return
+
+    for i in range(0, len(msg), 1900):
+        try:
+            requests.post(WEBHOOK_URL, json={"content": msg[i:i+1900]}, timeout=10)
+        except:
+            pass
+
+
+# =========================
+# KR Universe
+# =========================
+def get_kr():
     try:
-        chunks = [message[i:i + 1900] for i in range(0, len(message), 1900)]
-        for c in chunks:
-            requests.post(WEBHOOK_URL, json={"content": c}, timeout=15)
-    except Exception as e:
-        print("Discord error:", e)
+        tickers = stock.get_market_ticker_list(market="ALL")
+        return [t + ".KS" for t in tickers]
+    except:
+        return []
 
 
 # =========================
-# 2. TradingView 신호 엔진 (네 기존 구조 유지)
+# US Universe (S&P500)
 # =========================
-def get_tv_signal(df):
-
-    close = df["Close"]
-    volume = df["Volume"]
-
-    ma5 = close.rolling(5).mean()
-    ma20 = close.rolling(20).mean()
-
-    obv = (close.diff().fillna(0) * volume).cumsum()
-
-    i = -2
-
-    if ma5.iloc[i] > ma20.iloc[i] and close.iloc[i] > ma20.iloc[i] and obv.iloc[i] > obv.iloc[i-1]:
-        return "MAIN_BUY"
-
-    if ma5.iloc[i] > ma20.iloc[i]:
-        return "ST_BUY"
-
-    if close.iloc[i] < ma20.iloc[i]:
-        return "SELL"
-
-    return None
+def get_us():
+    try:
+        df = pd.read_html(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        )[0]
+        return df["Symbol"].tolist()
+    except:
+        return []
 
 
 # =========================
-# 3. 차트 필터 (S&P + NASDAQ 후보군)
+# Universe Router
 # =========================
-def get_candidate_tickers():
+def get_universe():
+
+    if MARKET_MODE == "KR":
+        return get_kr()
+
+    elif MARKET_MODE == "US":
+        return get_us()
+
+    elif MARKET_MODE == "ALL":
+        return get_kr() + get_us()
+
+    return []
+
+
+# =========================
+# TOP 300 유동성 필터
+# =========================
+def get_top_universe(tickers):
 
     try:
-        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]['Symbol'].tolist()
-        nasdaq100 = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]['Ticker'].tolist()
+        data = yf.download(
+            tickers,
+            period="30d",
+            group_by="ticker",
+            threads=True,
+            progress=False
+        )
 
-        tickers = list(set(sp500 + nasdaq100))[:300]
-
-        data = yf.download(tickers, period="30d", group_by='ticker', progress=False)
-
-        candidates = []
+        scores = []
 
         for t in tickers:
+
             try:
-                df = data[t].dropna()
-                if len(df) < 20:
+                if t not in data.columns.levels[0]:
                     continue
 
-                curr = df["Close"].iloc[-1]
+                df = data[t].dropna()
+
+                if len(df) < 25:
+                    continue
+
+                vol = df["Volume"]
+
+                avg_vol = vol.rolling(20).mean().iloc[-1]
+                curr_vol = vol.iloc[-1]
+
+                if avg_vol == 0 or np.isnan(avg_vol):
+                    continue
+
+                ratio = curr_vol / avg_vol
+
+                price = df["Close"].iloc[-1]
                 ma20 = df["Close"].rolling(20).mean().iloc[-1]
 
-                if curr < ma20 * 1.15:
-                    candidates.append(t)
+                score = 0
+                score += ratio * 50
+
+                if price > ma20:
+                    score += 30
+
+                scores.append((t, score))
 
             except:
                 continue
 
-        return candidates
+        scores.sort(key=lambda x: x[1], reverse=True)
+
+        return [t for t, _ in scores[:300]]
 
     except:
         return []
 
 
 # =========================
-# 4. 옵션 세력 분석 (핵심)
+# 매수 신호
+# =========================
+def get_signal(df):
+
+    ma5 = df["Close"].rolling(5).mean()
+    ma20 = df["Close"].rolling(20).mean()
+
+    price = df["Close"].iloc[-1]
+
+    if price > ma20.iloc[-1] and ma5.iloc[-1] > ma20.iloc[-1]:
+        return "MAIN_BUY"
+
+    if price > ma20.iloc[-1]:
+        return "ST_BUY"
+
+    return None
+
+
+# =========================
+# 옵션 세력 분석
 # =========================
 def analyze_options(ticker):
 
@@ -97,8 +155,9 @@ def analyze_options(ticker):
             return None
 
         chain = tk.option_chain(tk.options[0])
-        calls = chain.calls.fillna(0)
-        puts = chain.puts.fillna(0)
+
+        calls = chain.calls
+        puts = chain.puts
 
         call_oi = calls["openInterest"].sum()
         put_oi = puts["openInterest"].sum()
@@ -115,14 +174,25 @@ def analyze_options(ticker):
         if otm_calls.empty:
             return None
 
-        best = otm_calls.loc[otm_calls["openInterest"].idxmax()]
-        concentration = (best["openInterest"] / call_oi) * 100
+        top = otm_calls.loc[otm_calls["openInterest"].idxmax()]
 
-        if pcr < 0.5 and concentration >= 20:
-            return f"📈 [{ticker}] 눌림목 매집\n🎯 목표가: {best['strike']:.2f} | 집중도 {concentration:.1f}% | PCR {pcr:.2f}"
+        oi_ratio = top["openInterest"] / call_oi * 100
 
-        if pcr < 0.4 and concentration >= 25:
-            return f"🔥 [{ticker}] 강한 세력 매집\n🎯 목표가: {best['strike']:.2f} | 집중도 {concentration:.1f}% | PCR {pcr:.2f}"
+        if pcr < 0.7 and oi_ratio > 20:
+            return {
+                "type": "ACCUMULATION",
+                "pcr": round(pcr, 2),
+                "strike": round(top["strike"], 2),
+                "oi_ratio": round(oi_ratio, 1)
+            }
+
+        if pcr < 0.5:
+            return {
+                "type": "STRONG_ACCUMULATION",
+                "pcr": round(pcr, 2),
+                "strike": round(top["strike"], 2),
+                "oi_ratio": round(oi_ratio, 1)
+            }
 
         return None
 
@@ -131,55 +201,70 @@ def analyze_options(ticker):
 
 
 # =========================
-# 5. 개별 종목 분석 (TV + 옵션 병합)
+# 종목 분석
 # =========================
-def analyze_stock(ticker):
+def analyze(ticker):
 
     df = yf.download(ticker, period="6mo", interval="1d", progress=False)
 
-    if df is None or len(df) < 200:
+    if df is None or len(df) < 60:
         return None
 
-    signal = get_tv_signal(df)
+    signal = get_signal(df)
 
-    option_signal = analyze_options(ticker)
-
-    price = df["Close"].iloc[-2]
-
-    if not signal and not option_signal:
+    if not signal:
         return None
 
-    msg = f"📊 [{ticker}]\n현재가: {price}\n"
+    price = df["Close"].iloc[-1]
 
-    if signal:
-        msg += f"\n🔔 차트 신호: {signal}"
+    opt = analyze_options(ticker)
 
-    if option_signal:
-        msg += f"\n\n💣 옵션 세력:\n{option_signal}"
+    msg = f"""
+📊 {ticker}
+🟢 신호: {signal}
+💰 현재가: {price:.2f}
+"""
+
+    if opt:
+        msg += f"""
+🔥 옵션 세력
+- 타입: {opt['type']}
+- PCR: {opt['pcr']}
+- 행사가: {opt['strike']}
+- 콜 집중도: {opt['oi_ratio']}%
+"""
 
     return msg
 
 
 # =========================
-# 6. 실행
+# 실행
 # =========================
 def run():
 
-    candidates = get_candidate_tickers()
+    universe = get_universe()
+
+    if not universe:
+        send_discord("❌ Universe 없음")
+        return
+
+    top = get_top_universe(universe)
 
     results = []
 
-    for t in candidates[:50]:
-        res = analyze_stock(t)
+    for t in top[:50]:
+
+        res = analyze(t)
+
         if res:
             results.append(res)
 
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     if results:
-        msg = "🚀 세력 + 차트 통합 분석\n\n\n" + "\n\n-----------------\n\n".join(results)
+        msg = f"🚀 STOCK ALERT ({MARKET_MODE})\n\n" + "\n\n----------------\n\n".join(results)
     else:
-        msg = "현재 강한 세력 + 차트 신호 없음"
+        msg = f"📉 ({MARKET_MODE}) 신호 없음"
 
     send_discord(msg)
 
