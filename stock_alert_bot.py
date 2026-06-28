@@ -7,30 +7,29 @@ import yfinance as yf
 from pykrx import stock
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+# 🔥 안정화 핵심: mode 정리 (대소문자/공백/하이픈 방지)
 MARKET_MODE = os.getenv("MARKET_MODE", "KR")
+MARKET_MODE = MARKET_MODE.upper().replace("-", "_").replace(" ", "_")
 
 
 # =========================
-# Discord 전송
+# Discord
 # =========================
 def send_discord(msg):
     if not WEBHOOK_URL:
-        print("[ERROR] WEBHOOK_URL 없음")
+        print("WEBHOOK 없음")
         return
 
-    try:
-        for i in range(0, len(msg), 1900):
-            requests.post(
-                WEBHOOK_URL,
-                json={"content": msg[i:i+1900]},
-                timeout=10
-            )
-    except Exception as e:
-        print("Discord send error:", e)
+    for i in range(0, len(msg), 1900):
+        try:
+            requests.post(WEBHOOK_URL, json={"content": msg[i:i+1900]}, timeout=10)
+        except Exception as e:
+            print("Discord error:", e)
 
 
 # =========================
-# KR 유니버스
+# KR Universe
 # =========================
 def get_kr():
     try:
@@ -42,7 +41,7 @@ def get_kr():
 
 
 # =========================
-# US 유니버스
+# US Universe
 # =========================
 def get_us():
     try:
@@ -56,21 +55,26 @@ def get_us():
 
 
 # =========================
-# 유니버스 선택
+# Universe Router
 # =========================
 def get_universe():
-    print(f"[INFO] MARKET_MODE = {MARKET_MODE}")
+
+    print(f"[INFO] MODE = {MARKET_MODE}")
 
     if MARKET_MODE == "KR":
         u = get_kr()
+
     elif MARKET_MODE == "US":
         u = get_us()
+
+    elif MARKET_MODE == "US_OPTION":
+        u = get_us()   # 옵션도 결국 US 기반
+
     elif MARKET_MODE == "ALL":
         u = get_kr() + get_us()
-    elif MARKET_MODE == "US_OPTION":
-        u = get_us()
+
     else:
-        print("[ERROR] 잘못된 MARKET_MODE")
+        print("[ERROR] invalid MARKET_MODE:", MARKET_MODE)
         return []
 
     print(f"[INFO] universe size = {len(u)}")
@@ -78,7 +82,7 @@ def get_universe():
 
 
 # =========================
-# TOP 유동성 필터
+# TOP 필터
 # =========================
 def get_top_universe(tickers):
 
@@ -94,7 +98,6 @@ def get_top_universe(tickers):
         scores = []
 
         for t in tickers:
-
             try:
                 if t not in data.columns.levels[0]:
                     continue
@@ -104,7 +107,6 @@ def get_top_universe(tickers):
                     continue
 
                 vol = df["Volume"]
-
                 avg = vol.rolling(20).mean().iloc[-1]
                 curr = vol.iloc[-1]
 
@@ -123,20 +125,20 @@ def get_top_universe(tickers):
 
                 scores.append((t, score))
 
-            except Exception as e:
-                print(f"[TOP ERROR] {t}:", e)
+            except:
+                continue
 
         scores.sort(key=lambda x: x[1], reverse=True)
 
         return [t for t, _ in scores[:300]]
 
     except Exception as e:
-        print("TOP filter error:", e)
+        print("TOP error:", e)
         return []
 
 
 # =========================
-# 차트 신호
+# Signal
 # =========================
 def get_signal(df):
 
@@ -155,7 +157,7 @@ def get_signal(df):
 
 
 # =========================
-# 옵션 분석
+# Option
 # =========================
 def analyze_options(ticker):
 
@@ -208,22 +210,17 @@ def analyze_options(ticker):
         return None
 
     except Exception as e:
-        print(f"[OPTION ERROR] {ticker}:", e)
+        print("OPTION error:", e)
         return None
 
 
 # =========================
-# 종목 분석
+# Analyze
 # =========================
 def analyze(ticker):
 
     try:
-        df = yf.download(
-            ticker,
-            period="6mo",
-            interval="1d",
-            progress=False
-        )
+        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
 
         if df is None or len(df) < 60:
             return None
@@ -255,51 +252,43 @@ def analyze(ticker):
         return msg
 
     except Exception as e:
-        return f"⚠️ 종목 오류: {ticker} | {str(e)}"
+        return f"⚠️ ERROR {ticker}: {str(e)}"
 
 
 # =========================
-# 실행
+# RUN
 # =========================
 def run():
 
-    try:
-        universe = get_universe()
+    universe = get_universe()
 
-        if not universe:
-            send_discord("❌ Universe 없음 (데이터 or MODE 오류)")
-            return
+    if not universe:
+        send_discord(f"❌ Universe 없음 | MODE={MARKET_MODE}")
+        return
 
-        top = get_top_universe(universe)
+    top = get_top_universe(universe)
 
-        if not top:
-            send_discord("📉 TOP 필터 결과 없음")
-            return
+    if not top:
+        send_discord("📉 TOP 필터 없음")
+        return
 
-        results = []
+    results = []
 
-        for t in top[:50]:
+    for t in top[:50]:
 
-            try:
-                res = analyze(t)
+        res = analyze(t)
 
-                if res:
-                    results.append(res)
+        if res:
+            results.append(res)
 
-                time.sleep(0.2)
+        time.sleep(0.2)
 
-            except Exception as e:
-                send_discord(f"⚠️ 분석 오류: {t} | {str(e)}")
+    if results:
+        msg = f"🚀 STOCK ALERT ({MARKET_MODE})\n\n" + "\n\n----------------\n\n".join(results)
+    else:
+        msg = f"📉 ({MARKET_MODE}) 신호 없음"
 
-        if results:
-            msg = "🚀 STOCK ALERT SYSTEM\n\n" + "\n\n----------------\n\n".join(results)
-        else:
-            msg = "📉 신호 없음 (조건 만족 종목 없음)"
-
-        send_discord(msg)
-
-    except Exception as e:
-        send_discord(f"🔥 시스템 전체 오류\n{str(e)}")
+    send_discord(msg)
 
 
 if __name__ == "__main__":
