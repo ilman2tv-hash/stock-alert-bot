@@ -7,10 +7,7 @@ import yfinance as yf
 from pykrx import stock
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-# 🔥 안정화 핵심: mode 정리 (대소문자/공백/하이픈 방지)
-MARKET_MODE = os.getenv("MARKET_MODE", "KR")
-MARKET_MODE = MARKET_MODE.upper().replace("-", "_").replace(" ", "_")
+MARKET_MODE = os.getenv("MARKET_MODE", "KR").upper().replace("-", "_").replace(" ", "_")
 
 
 # =========================
@@ -21,11 +18,15 @@ def send_discord(msg):
         print("WEBHOOK 없음")
         return
 
-    for i in range(0, len(msg), 1900):
-        try:
-            requests.post(WEBHOOK_URL, json={"content": msg[i:i+1900]}, timeout=10)
-        except Exception as e:
-            print("Discord error:", e)
+    try:
+        for i in range(0, len(msg), 1900):
+            requests.post(
+                WEBHOOK_URL,
+                json={"content": msg[i:i+1900]},
+                timeout=10
+            )
+    except Exception as e:
+        print("Discord error:", e)
 
 
 # =========================
@@ -55,7 +56,7 @@ def get_us():
 
 
 # =========================
-# Universe Router
+# Universe Router (KR / US only)
 # =========================
 def get_universe():
 
@@ -67,14 +68,8 @@ def get_universe():
     elif MARKET_MODE == "US":
         u = get_us()
 
-    elif MARKET_MODE == "US_OPTION":
-        u = get_us()   # 옵션도 결국 US 기반
-
-    elif MARKET_MODE == "ALL":
-        u = get_kr() + get_us()
-
     else:
-        print("[ERROR] invalid MARKET_MODE:", MARKET_MODE)
+        print("[ERROR] invalid mode:", MARKET_MODE)
         return []
 
     print(f"[INFO] universe size = {len(u)}")
@@ -82,7 +77,7 @@ def get_universe():
 
 
 # =========================
-# TOP 필터
+# TOP 유동성 필터
 # =========================
 def get_top_universe(tickers):
 
@@ -157,7 +152,7 @@ def get_signal(df):
 
 
 # =========================
-# Option
+# Option (US only 의미 있게 유지)
 # =========================
 def analyze_options(ticker):
 
@@ -220,7 +215,12 @@ def analyze_options(ticker):
 def analyze(ticker):
 
     try:
-        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
+        df = yf.download(
+            ticker,
+            period="6mo",
+            interval="1d",
+            progress=False
+        )
 
         if df is None or len(df) < 60:
             return None
@@ -269,7 +269,7 @@ def run():
     top = get_top_universe(universe)
 
     if not top:
-        send_discord("📉 TOP 필터 없음")
+        send_discord(f"📉 신호 없음 (TOP 필터 결과 없음) | MODE={MARKET_MODE}")
         return
 
     results = []
@@ -283,10 +283,13 @@ def run():
 
         time.sleep(0.2)
 
+    # =========================
+    # 핵심: 신호없음 처리
+    # =========================
     if results:
-        msg = f"🚀 STOCK ALERT ({MARKET_MODE})\n\n" + "\n\n----------------\n\n".join(results)
+        msg = f"🚀 STOCK ALERT SYSTEM ({MARKET_MODE})\n\n" + "\n\n----------------\n\n".join(results)
     else:
-        msg = f"📉 ({MARKET_MODE}) 신호 없음"
+        msg = f"📉 신호 없음 (조건 해당 종목 없음) | MODE={MARKET_MODE}"
 
     send_discord(msg)
 
