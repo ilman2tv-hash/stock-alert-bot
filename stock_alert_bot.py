@@ -18,15 +18,15 @@ def send_discord(msg):
         print("WEBHOOK 없음")
         return
 
-    try:
-        for i in range(0, len(msg), 1900):
+    for i in range(0, len(msg), 1900):
+        try:
             requests.post(
                 WEBHOOK_URL,
                 json={"content": msg[i:i+1900]},
                 timeout=10
             )
-    except Exception as e:
-        print("Discord error:", e)
+        except Exception as e:
+            print("Discord error:", e)
 
 
 # =========================
@@ -37,7 +37,7 @@ def get_kr():
         tickers = stock.get_market_ticker_list(market="ALL")
         return [t + ".KS" for t in tickers]
     except Exception as e:
-        print("KR error:", e)
+        print("[KR ERROR]", e)
         return []
 
 
@@ -46,38 +46,35 @@ def get_kr():
 # =========================
 def get_us():
     try:
-        df = pd.read_html(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        )[0]
-        return df["Symbol"].tolist()
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        df = pd.read_html(url)[0]
+        return df["Symbol"].dropna().tolist()
     except Exception as e:
-        print("US error:", e)
+        print("[US ERROR]", e)
         return []
 
 
 # =========================
-# Universe Router (KR / US only)
+# Universe Router
 # =========================
 def get_universe():
 
-    print(f"[INFO] MODE = {MARKET_MODE}")
+    print(f"[DEBUG] MODE = {MARKET_MODE}")
 
     if MARKET_MODE == "KR":
         u = get_kr()
-
     elif MARKET_MODE == "US":
         u = get_us()
-
     else:
-        print("[ERROR] invalid mode:", MARKET_MODE)
-        return []
+        u = []
 
-    print(f"[INFO] universe size = {len(u)}")
+    print(f"[DEBUG] universe size = {len(u)}")
+
     return u
 
 
 # =========================
-# TOP 유동성 필터
+# TOP Filter
 # =========================
 def get_top_universe(tickers):
 
@@ -128,7 +125,7 @@ def get_top_universe(tickers):
         return [t for t, _ in scores[:300]]
 
     except Exception as e:
-        print("TOP error:", e)
+        print("[TOP ERROR]", e)
         return []
 
 
@@ -152,7 +149,7 @@ def get_signal(df):
 
 
 # =========================
-# Option (US only 의미 있게 유지)
+# Option (US only)
 # =========================
 def analyze_options(ticker):
 
@@ -205,7 +202,7 @@ def analyze_options(ticker):
         return None
 
     except Exception as e:
-        print("OPTION error:", e)
+        print("[OPTION ERROR]", e)
         return None
 
 
@@ -256,24 +253,27 @@ def analyze(ticker):
 
 
 # =========================
-# RUN
+# RUN (상태 완전 분리)
 # =========================
 def run():
 
     universe = get_universe()
 
-    if not universe:
-        send_discord(f"❌ Universe 없음 | MODE={MARKET_MODE}")
+    # 1️⃣ universe 실패
+    if len(universe) == 0:
+        send_discord(f"❌ Universe 없음 (데이터 로딩 실패) | MODE={MARKET_MODE}")
         return
 
+    # 2️⃣ TOP 필터 실패
     top = get_top_universe(universe)
 
-    if not top:
-        send_discord(f"📉 신호 없음 (TOP 필터 결과 없음) | MODE={MARKET_MODE}")
+    if len(top) == 0:
+        send_discord(f"📉 TOP 없음 (유동성/필터 조건 미달) | MODE={MARKET_MODE}")
         return
 
     results = []
 
+    # 3️⃣ signal 분석
     for t in top[:50]:
 
         res = analyze(t)
@@ -283,15 +283,12 @@ def run():
 
         time.sleep(0.2)
 
-    # =========================
-    # 핵심: 신호없음 처리
-    # =========================
-    if results:
-        msg = f"🚀 STOCK ALERT SYSTEM ({MARKET_MODE})\n\n" + "\n\n----------------\n\n".join(results)
+    # 4️⃣ 최종 결과
+    if len(results) == 0:
+        send_discord(f"📉 신호 없음 (조건 해당 종목 없음) | MODE={MARKET_MODE}")
     else:
-        msg = f"📉 신호 없음 (조건 해당 종목 없음) | MODE={MARKET_MODE}"
-
-    send_discord(msg)
+        msg = f"🚀 STOCK ALERT SYSTEM ({MARKET_MODE})\n\n" + "\n\n----------------\n\n".join(results)
+        send_discord(msg)
 
 
 if __name__ == "__main__":
