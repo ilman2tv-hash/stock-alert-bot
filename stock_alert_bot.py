@@ -7,7 +7,7 @@ import yfinance as yf
 from pykrx import stock
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-MARKET_MODE = os.getenv("MARKET_MODE", "KR").upper().replace("-", "_").replace(" ", "_")
+MARKET_MODE = os.getenv("MARKET_MODE", "KR").upper().replace("-", "_")
 
 
 # =========================
@@ -15,16 +15,12 @@ MARKET_MODE = os.getenv("MARKET_MODE", "KR").upper().replace("-", "_").replace("
 # =========================
 def send_discord(msg):
     if not WEBHOOK_URL:
-        print("WEBHOOK 없음")
+        print("NO WEBHOOK")
         return
 
     for i in range(0, len(msg), 1900):
         try:
-            requests.post(
-                WEBHOOK_URL,
-                json={"content": msg[i:i+1900]},
-                timeout=10
-            )
+            requests.post(WEBHOOK_URL, json={"content": msg[i:i+1900]}, timeout=10)
         except Exception as e:
             print("Discord error:", e)
 
@@ -36,21 +32,20 @@ def get_kr():
     try:
         tickers = stock.get_market_ticker_list(market="ALL")
         return [t + ".KS" for t in tickers]
-    except Exception as e:
-        print("[KR ERROR]", e)
+    except:
         return []
 
 
 # =========================
-# US Universe
+# US Universe (S&P + NASDAQ100)
 # =========================
 def get_us():
     try:
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        df = pd.read_html(url)[0]
-        return df["Symbol"].dropna().tolist()
-    except Exception as e:
-        print("[US ERROR]", e)
+        sp = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]["Symbol"]
+        nasdaq = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]["Ticker"]
+
+        return list(set(sp.tolist() + nasdaq.tolist()))
+    except:
         return []
 
 
@@ -58,81 +53,47 @@ def get_us():
 # Universe Router
 # =========================
 def get_universe():
-
-    print(f"[DEBUG] MODE = {MARKET_MODE}")
-
     if MARKET_MODE == "KR":
-        u = get_kr()
+        return get_kr()
     elif MARKET_MODE == "US":
-        u = get_us()
-    else:
-        u = []
-
-    print(f"[DEBUG] universe size = {len(u)}")
-
-    return u
+        return get_us()
+    elif MARKET_MODE == "ALL":
+        return get_kr() + get_us()
+    return []
 
 
 # =========================
-# TOP Filter
+# 테마 필터 (US)
 # =========================
-def get_top_universe(tickers):
+def apply_theme_filter(tickers):
 
-    try:
-        data = yf.download(
-            tickers,
-            period="30d",
-            group_by="ticker",
-            threads=True,
-            progress=False
-        )
+    themes = {
+        "AI": {"NVDA","MSFT","GOOGL","META","AMZN","PLTR","AMD"},
+        "SPACE": {"SPCE","RKLB","ASTS","LMT","NOC","RTX"},
+        "POWER": {"CEG","VST","NEE","DUK","SO","ETN","GE"},
+        "NUCLEAR": {"SMR","CCJ","BWXT","OKLO","NEE"},
+        "COOLING": {"VRT","ANET","DELL","HPE","STX"},
+        "DRONE": {"AVAV","KTOS","RTX","LMT","NOC","LHX"},
+        "SEMICON": {"AVGO","INTC","TSM","QCOM","MU","ASML"},
+        "CYBER": {"PANW","CRWD","ZS","FTNT"},
+        "ENERGY_STORAGE": {"TSLA","LAC","QS","ALB","ENVX"},
+        "CLOUD": {"AMZN","MSFT","GOOGL","SNOW","CRM","NOW"}
+    }
 
-        scores = []
+    theme_set = set()
+    for v in themes.values():
+        theme_set |= v
 
-        for t in tickers:
-            try:
-                if t not in data.columns.levels[0]:
-                    continue
-
-                df = data[t].dropna()
-                if len(df) < 25:
-                    continue
-
-                vol = df["Volume"]
-                avg = vol.rolling(20).mean().iloc[-1]
-                curr = vol.iloc[-1]
-
-                if avg == 0 or np.isnan(avg):
-                    continue
-
-                ratio = curr / avg
-
-                price = df["Close"].iloc[-1]
-                ma20 = df["Close"].rolling(20).mean().iloc[-1]
-
-                score = ratio * 50
-
-                if price > ma20:
-                    score += 30
-
-                scores.append((t, score))
-
-            except:
-                continue
-
-        scores.sort(key=lambda x: x[1], reverse=True)
-
-        return [t for t, _ in scores[:300]]
-
-    except Exception as e:
-        print("[TOP ERROR]", e)
-        return []
+    return list(set(tickers) & theme_set)
 
 
 # =========================
 # Signal
 # =========================
 def get_signal(df):
+
+    if df is None or len(df) < 30:
+        return None
 
     ma5 = df["Close"].rolling(5).mean()
     ma20 = df["Close"].rolling(20).mean()
@@ -141,69 +102,10 @@ def get_signal(df):
 
     if price > ma20.iloc[-1] and ma5.iloc[-1] > ma20.iloc[-1]:
         return "MAIN_BUY"
-
-    if price > ma20.iloc[-1]:
+    elif price > ma20.iloc[-1]:
         return "ST_BUY"
 
     return None
-
-
-# =========================
-# Option (US only)
-# =========================
-def analyze_options(ticker):
-
-    try:
-        tk = yf.Ticker(ticker)
-
-        if not tk.options:
-            return None
-
-        chain = tk.option_chain(tk.options[0])
-
-        calls = chain.calls
-        puts = chain.puts
-
-        call_oi = calls["openInterest"].sum()
-        put_oi = puts["openInterest"].sum()
-
-        if call_oi == 0:
-            return None
-
-        pcr = put_oi / call_oi
-
-        price = tk.history(period="1d")["Close"].iloc[-1]
-
-        otm_calls = calls[calls["strike"] > price]
-
-        if otm_calls.empty:
-            return None
-
-        top = otm_calls.loc[otm_calls["openInterest"].idxmax()]
-
-        oi_ratio = top["openInterest"] / call_oi * 100
-
-        if pcr < 0.7 and oi_ratio > 20:
-            return {
-                "type": "ACCUMULATION",
-                "pcr": round(pcr, 2),
-                "strike": round(top["strike"], 2),
-                "oi_ratio": round(oi_ratio, 1)
-            }
-
-        if pcr < 0.5:
-            return {
-                "type": "STRONG_ACCUMULATION",
-                "pcr": round(pcr, 2),
-                "strike": round(top["strike"], 2),
-                "oi_ratio": round(oi_ratio, 1)
-            }
-
-        return None
-
-    except Exception as e:
-        print("[OPTION ERROR]", e)
-        return None
 
 
 # =========================
@@ -212,82 +114,53 @@ def analyze_options(ticker):
 def analyze(ticker):
 
     try:
-        df = yf.download(
-            ticker,
-            period="6mo",
-            interval="1d",
-            progress=False
-        )
-
-        if df is None or len(df) < 60:
-            return None
+        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
 
         signal = get_signal(df)
-
         if not signal:
             return None
 
         price = df["Close"].iloc[-1]
 
-        opt = analyze_options(ticker)
-
-        msg = f"""
-📊 {ticker}
+        return f"""📊 {ticker}
 🟢 신호: {signal}
-💰 현재가: {price:.2f}
-"""
+💰 가격: {price:.2f}"""
 
-        if opt:
-            msg += f"""
-🔥 옵션 세력
-- 타입: {opt['type']}
-- PCR: {opt['pcr']}
-- 행사가: {opt['strike']}
-- 콜 집중도: {opt['oi_ratio']}%
-"""
-
-        return msg
-
-    except Exception as e:
-        return f"⚠️ ERROR {ticker}: {str(e)}"
+    except:
+        return None
 
 
 # =========================
-# RUN (상태 완전 분리)
+# RUN
 # =========================
 def run():
 
     universe = get_universe()
 
-    # 1️⃣ universe 실패
     if len(universe) == 0:
-        send_discord(f"❌ Universe 없음 (데이터 로딩 실패) | MODE={MARKET_MODE}")
+        send_discord(f"❌ Universe 없음 | MODE={MARKET_MODE}")
         return
 
-    # 2️⃣ TOP 필터 실패
-    top = get_top_universe(universe)
+    # US면 테마 필터 적용
+    if MARKET_MODE in ["US", "ALL"]:
+        universe = apply_theme_filter(universe)
 
-    if len(top) == 0:
-        send_discord(f"📉 TOP 없음 (유동성/필터 조건 미달) | MODE={MARKET_MODE}")
+    if len(universe) == 0:
+        send_discord(f"📉 필터 후 종목 없음 | MODE={MARKET_MODE}")
         return
 
     results = []
 
-    # 3️⃣ signal 분석
-    for t in top[:50]:
-
+    for t in universe[:80]:
         res = analyze(t)
-
         if res:
             results.append(res)
-
         time.sleep(0.2)
 
-    # 4️⃣ 최종 결과
-    if len(results) == 0:
-        send_discord(f"📉 신호 없음 (조건 해당 종목 없음) | MODE={MARKET_MODE}")
+    if not results:
+        send_discord(f"📉 신호 없음 | MODE={MARKET_MODE}")
     else:
-        msg = f"🚀 STOCK ALERT SYSTEM ({MARKET_MODE})\n\n" + "\n\n----------------\n\n".join(results)
+        msg = "🚀 STOCK SCANNER\n\n" + "\n\n----------------\n\n".join(results)
         send_discord(msg)
 
 
