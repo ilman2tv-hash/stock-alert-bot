@@ -13,7 +13,6 @@ on:
         options:
           - KR
           - US
-          - US_OPTION
           - ALL
 
 jobs:
