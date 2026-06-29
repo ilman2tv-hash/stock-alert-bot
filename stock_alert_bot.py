@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 import yfinance as yf
-import FinanceDataReader as fdr # 추가됨
+import FinanceDataReader as fdr
 from concurrent.futures import ThreadPoolExecutor
 
 # 환경 변수 및 설정
@@ -43,7 +43,7 @@ def get_us():
     except:
         return FALLBACK_US
 
-# [국장] FinanceDataReader로 변경 (GitHub Actions 최적화)
+# [국장] FinanceDataReader 적용
 def get_kr():
     try:
         df_krx = fdr.StockListing('KRX')
@@ -62,10 +62,9 @@ def get_kr():
 def analyze_ticker(ticker):
     try:
         df = yf.download(ticker, period="6mo", interval="1d", progress=False)
-        # 데이터가 비어있거나 부족한 경우 방지
         if df.empty or len(df) < 30: return None
         
-        # 멀티인덱스 컬럼 처리 (yfinance 최신버전 대응)
+        # yfinance 멀티인덱스 대응 코드
         close_data = df["Close"].iloc[:, 0] if len(df["Close"].shape) > 1 else df["Close"]
         
         ma5 = close_data.rolling(5).mean().iloc[-1]
