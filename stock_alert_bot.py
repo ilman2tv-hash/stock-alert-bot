@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 import yfinance as yf
-from pykrx import stock
+import FinanceDataReader as fdr # 추가됨
 from concurrent.futures import ThreadPoolExecutor
 
 # 환경 변수 및 설정
@@ -32,6 +32,7 @@ def send_discord(msg):
     except Exception as e:
         print("Discord error:", e)
 
+# [미국장] 기존 로직 유지
 def get_us():
     try:
         sp_res = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", headers=HEADERS, timeout=10)
@@ -42,31 +43,40 @@ def get_us():
     except:
         return FALLBACK_US
 
+# [국장] FinanceDataReader로 변경 (GitHub Actions 최적화)
 def get_kr():
     try:
-        # 시가총액 상위 300개로 제한하여 안정성 확보
-        kospi = [t + ".KS" for t in stock.get_market_ticker_list(market="KOSPI")[:300]]
-        kosdaq = [t + ".KQ" for t in stock.get_market_ticker_list(market="KOSDAQ")[:300]]
-        return kospi + kosdaq
-    except:
+        df_krx = fdr.StockListing('KRX')
+        # 시가총액 상위 300개 추출
+        top300 = df_krx.sort_values(by='Marcap', ascending=False).head(300)
+        
+        tickers = []
+        for _, row in top300.iterrows():
+            market_suffix = ".KS" if row['Market'] == 'KOSPI' else ".KQ"
+            tickers.append(f"{row['Code']}{market_suffix}")
+        return tickers
+    except Exception as e:
+        print(f"KR 데이터 수집 오류: {e}")
         return []
 
 def analyze_ticker(ticker):
-    """개별 종목 분석 함수 (안정적인 데이터 수집)"""
     try:
-        # yfinance 다운로드 시 retry 로직과 timeout 설정 효과
         df = yf.download(ticker, period="6mo", interval="1d", progress=False)
-        if df is None or len(df) < 30: return None
+        # 데이터가 비어있거나 부족한 경우 방지
+        if df.empty or len(df) < 30: return None
         
-        ma5 = df["Close"].rolling(5).mean().iloc[-1]
-        ma20 = df["Close"].rolling(20).mean().iloc[-1]
-        price = float(df["Close"].iloc[-1])
+        # 멀티인덱스 컬럼 처리 (yfinance 최신버전 대응)
+        close_data = df["Close"].iloc[:, 0] if len(df["Close"].shape) > 1 else df["Close"]
+        
+        ma5 = close_data.rolling(5).mean().iloc[-1]
+        ma20 = close_data.rolling(20).mean().iloc[-1]
+        price = float(close_data.iloc[-1])
         
         if price > ma20 and ma5 > ma20: signal = "MAIN_BUY"
         elif price > ma20: signal = "ST_BUY"
         else: return None
         
-        matched = [t for t, tickers in THEMES.items() if ticker in tickers]
+        matched = [t for t, tickers in THEMES.items() if ticker.split('.')[0] in tickers]
         tag = f" [{', '.join(matched)}]" if matched else ""
         return f"📊 {ticker}{tag}\n🟢 신호: {signal}\n💰 가격: {price:.2f}"
     except:
@@ -83,13 +93,12 @@ def run():
 
     print(f"🚀 스캔 시작: {len(universe)}개 종목 (안전 모드)")
     
-    # 5개씩 병렬 처리하여 차단 방지 및 속도 향상
     results = []
     with ThreadPoolExecutor(max_workers=5) as executor:
         for res in executor.map(analyze_ticker, universe):
             if res:
                 results.append(res)
-            time.sleep(0.3) # 각 작업 사이 짧은 대기 (안전성)
+            time.sleep(0.3) 
 
     if not results:
         send_discord(f"📉 조건에 맞는 신호 없음 (총 {len(universe)}개 종목 스캔 완료)")
