@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import requests
 import numpy as np
@@ -14,7 +15,18 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 }
 
-FALLBACK_US = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AMD", "NFLX", "PLTR", "INTC"]
+# S&P500 / NASDAQ 주요 핵심 대형 우량주 (모든 네트워크 통신 실패 시 작동하는 최후의 80개 보루)
+FALLBACK_US = [
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "COST", "PEP",
+    "CSCO", "ADBE", "AMD", "QCOM", "NFLX", "TXN", "AMGN", "INTU", "ISRG", "HON",
+    "AMAT", "BKNG", "CMCSA", "VRTX", "MU", "REGN", "LRCX", "ADI", "PANW", "MDLZ",
+    "MELI", "SNPS", "KLAC", "CDNS", "ASML", "CSX", "MAR", "ORLY", "CTAS", "NXPI",
+    "WDAY", "ROP", "PCAR", "MNST", "PAYX", "ROST", "ADSK", "LULU", "KDP", "GILD",
+    "ODFL", "FAST", "MCHP", "CPRT", "SBUX", "MRVL", "CTSH", "AEP", "PDD", "IDXX",
+    "EXC", "AZN", "BKR", "FTNT", "EA", "ALGN", "GEHC", "KHC", "WBA", "ILMN",
+    "CEG", "VST", "PLTR", "CRM", "NOW", "SNOW", "DDOG", "NET", "TEAM", "MDB", "TSM"
+]
+
 TICKER_NAMES = {
     "AAPL": "애플", "MSFT": "마이크로소프트", "NVDA": "엔비디아", "GOOGL": "구글",
     "AMZN": "아마존", "META": "메타", "TSLA": "테슬라", "AMD": "AMD",
@@ -39,23 +51,57 @@ def send_discord(msg):
 
 def get_us():
     global TICKER_NAMES
+    tickers = []
+    
+    # 1. FinanceDataReader를 통한 S&P 500 로드 (가장 안정적이고 차단 위험 없음)
     try:
-        sp_res = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", headers=HEADERS, timeout=10)
-        sp_df = pd.read_html(sp_res.text, match="Symbol")[0]
-        nd_res = requests.get("https://en.wikipedia.org/wiki/Nasdaq-100", headers=HEADERS, timeout=10)
-        nd_df = pd.read_html(nd_res.text, match="Ticker")[0]
-        
-        for _, row in sp_df.iterrows():
-            t = str(row.get("Symbol")).strip()
-            n = str(row.get("Security")).strip()
-            if t and n and t not in TICKER_NAMES: TICKER_NAMES[t] = n
-        for _, row in nd_df.iterrows():
-            t = str(row.get("Ticker")).strip()
-            n = str(row.get("Company")).strip()
-            if t and n and t not in TICKER_NAMES: TICKER_NAMES[t] = n
-        return list(set(sp_df["Symbol"].tolist() + nd_df["Ticker"].tolist()))
-    except:
+        print("🔍 FinanceDataReader를 통해 S&P 500 종목 로드 중...")
+        df_sp = fdr.StockListing('S&P500')
+        if not df_sp.empty:
+            for _, row in df_sp.iterrows():
+                t = str(row.get('Symbol', '')).strip()
+                n = str(row.get('Name', '')).strip()
+                if t:
+                    tickers.append(t)
+                    if t not in TICKER_NAMES:
+                        TICKER_NAMES[t] = n
+            print(f"✅ FDR S&P 500 로드 성공: {len(tickers)}개 확보")
+    except Exception as e:
+        print(f"⚠️ FDR S&P 500 로드 실패 ({e}). 백업 절차를 준비합니다.")
+
+    # 2. 필수 테마 및 핵심 기술주 (S&P500에 누락되었거나 ADR인 반도체/클라우드 등) 강제 편입
+    core_tech_nasdaq = [
+        "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "COST", "PEP",
+        "CSCO", "ADBE", "AMD", "QCOM", "NFLX", "TXN", "AMGN", "INTU", "ISRG", "HON",
+        "AMAT", "BKNG", "CMCSA", "VRTX", "MU", "REGN", "LRCX", "ADI", "PANW", "MDLZ",
+        "MELI", "SNPS", "KLAC", "CDNS", "ASML", "CSX", "MAR", "ORLY", "CTAS", "NXPI",
+        "WDAY", "ROP", "PCAR", "MNST", "PAYX", "ROST", "ADSK", "LULU", "KDP", "GILD",
+        "ODFL", "FAST", "MCHP", "CPRT", "SBUX", "MRVL", "CTSH", "AEP", "PDD", "IDXX",
+        "EXC", "AZN", "BKR", "FTNT", "EA", "ALGN", "GEHC", "KHC", "WBA", "ILMN",
+        "CEG", "VST", "PLTR", "CRM", "NOW", "SNOW", "DDOG", "NET", "TEAM", "MDB", "TSM"
+    ]
+    
+    # 설정된 테마 사전(THEMES)에 정의된 주식들이 스캔 리스트에 반드시 존재하도록 확인
+    for theme, t_set in THEMES.items():
+        for t in t_set:
+            if t not in core_tech_nasdaq:
+                core_tech_nasdaq.append(t)
+                
+    # 종목 병합 및 한글/영문 이름 매핑 테이블 초기화
+    for t in core_tech_nasdaq:
+        if t not in tickers:
+            tickers.append(t)
+        if t not in TICKER_NAMES:
+            TICKER_NAMES[t] = t  # 매핑된 한글명이 없다면 티커명을 기본으로 지정
+
+    # 3. 네트워크가 완전히 마비되었을 경우 최후의 비상 수단
+    if not tickers:
+        print("🚨 모든 네트워크 로딩 실패. 80개 우량주 기본 리스트를 불러옵니다.")
         return FALLBACK_US
+
+    unique_tickers = list(set(tickers))
+    print(f"🚀 미국 주식 총 {len(unique_tickers)}개 종목 스캔 준비 완료!")
+    return unique_tickers
 
 def get_kr():
     global TICKER_NAMES
@@ -84,15 +130,31 @@ def crossunder(s1, s2):
     return (s1 < s2) & (s1.shift(1) >= s2.shift(1))
 
 def analyze_ticker(ticker):
+    global TICKER_NAMES
     try:
-        # 지표 연산을 위해 충분히 1년 치 데이터를 가져옵니다.
-        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        # yfinance 다운로드 안정성 극대화를 위한 최대 3회 자동 재시도 루프
+        df = pd.DataFrame()
+        for attempt in range(3):
+            try:
+                df = yf.download(ticker, period="1y", interval="1d", progress=False)
+                if not df.empty and len(df) >= 60:
+                    break
+            except Exception:
+                pass
+            time.sleep(1.0) # 일시적 오류 방지를 위해 재시도 전 1초 대기
+            
         if df.empty or len(df) < 60: return None
         
-        # 1D Series 데이터 정리
+        # 1D Series 데이터 정리 및 MultiIndex 구조 완벽 대응
         close_data = df["Close"].iloc[:, 0] if len(df["Close"].shape) > 1 else df["Close"]
         high_data = df["High"].iloc[:, 0] if len(df["High"].shape) > 1 else df["High"]
         low_data = df["Low"].iloc[:, 0] if len(df["Low"].shape) > 1 else df["Low"]
+        
+        close_data = pd.Series(close_data).ffill().dropna().astype(float)
+        high_data = pd.Series(high_data).ffill().dropna().astype(float)
+        low_data = pd.Series(low_data).ffill().dropna().astype(float)
+        
+        if len(close_data) < 60: return None
         
         # 1. 기본 이평선 계산
         ma20 = close_data.rolling(20).mean()
@@ -225,7 +287,9 @@ def analyze_ticker(ticker):
         price = float(close_data.iloc[-1])
         
         return f"📊 **{stock_name}** ({ticker}){tag}\n💬 신호: {signal}\n💰 현재가: {price:.2f}"
-    except:
+    except Exception as e:
+        # 디버깅 및 예외 로깅을 위한 로컬 출력
+        print(f"Error analyzing {ticker}: {e}")
         return None
 
 def run():
@@ -237,14 +301,15 @@ def run():
         send_discord("⚠️ 감시 대상 종목을 불러올 수 없습니다.")
         return
 
-    print(f"🚀 스캔 시작: {len(universe)}개 종목 (트레이딩뷰 커스텀 전략 동기화 모드)")
+    print(f"🚀 스캔 시작: {len(universe)}개 종목 (GitHub Actions 안정화 버전)")
     
     results = []
+    # 요청 속도 및 병렬 처리 밸런스를 고려하여 max_workers 유지 및 안정적 인터벌 배치
     with ThreadPoolExecutor(max_workers=5) as executor:
         for res in executor.map(analyze_ticker, universe):
             if res:
                 results.append(res)
-            time.sleep(0.3) 
+            time.sleep(0.15) 
 
     if not results:
         send_discord(f"📉 조건에 맞는 신호 없음 (총 {len(universe)}개 종목 스캔 완료)")
